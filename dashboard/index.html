@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Polymarket Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root { --bg:#0d0f14; --panel:#151923; --line:rgba(255,255,255,.08); --text:#f3f6fb; --muted:#91a0b8; --green:#00ff88; --red:#ff4466; --amber:#ffaa00; --shadow:0 18px 40px rgba(0,0,0,.35); --radius:20px; }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html,body { height:100%; }
+    body { margin:0; color:var(--text); background:radial-gradient(circle at top right, rgba(0,255,136,.11), transparent 32%),radial-gradient(circle at top left, rgba(255,170,0,.09), transparent 26%),linear-gradient(180deg,#0d0f14 0%,#090b10 100%); font-family:"Inter",sans-serif; }
+    .app { max-width:430px; min-height:100dvh; margin:0 auto; padding:18px 16px 96px; }
+    .header,.row,.stat { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .header { align-items:flex-start; margin-bottom:18px; }
+    .title { font-size:1.35rem; font-weight:700; letter-spacing:-.03em; }
+    .subtitle,.last-updated,.warning,.muted { color:var(--muted); }
+    .subtitle,.last-updated,.warning,.small { font-size:.82rem; }
+    .warning { color:var(--amber); margin-top:8px; display:none; }
+    .tab { display:none; animation:rise .22s ease; }
+    .tab.active { display:block; }
+    .card,.position-card,.market-card,.log-entry { background:linear-gradient(180deg, rgba(21,25,35,.95), rgba(12,15,21,.95)); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:16px; margin-bottom:14px; }
+    .stat { padding:12px 0; border-bottom:1px solid var(--line); }
+    .stat:last-child { border-bottom:0; padding-bottom:0; }
+    .label { color:var(--muted); font-size:.83rem; text-transform:uppercase; letter-spacing:.08em; }
+    .value,.money,.mono { font-family:"IBM Plex Mono",monospace; }
+    .value { font-size:1.04rem; font-weight:600; }
+    .money.big { font-size:1.7rem; font-weight:600; letter-spacing:-.04em; }
+    .positive { color:var(--green); }
+    .negative { color:var(--red); }
+    .neutral { color:var(--amber); }
+    .badge { padding:4px 10px; border-radius:999px; font-size:.75rem; font-weight:600; border:1px solid currentColor; }
+    .bot-indicator { display:inline-flex; align-items:center; gap:8px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--amber); box-shadow:0 0 0 rgba(255,170,0,.5); }
+    .dot.running { background:var(--green); animation:pulse 1.5s infinite; }
+    .section-title { font-size:.9rem; letter-spacing:.06em; color:var(--muted); text-transform:uppercase; margin-bottom:12px; }
+    .list { display:flex; flex-direction:column; gap:12px; }
+    .market-title,.position-title { font-size:.96rem; font-weight:600; line-height:1.35; margin-bottom:8px; }
+    .spacer { height:8px; }
+    .scroll-area { max-height:300px; overflow:auto; padding-right:4px; }
+    canvas { width:100%; height:90px; display:block; }
+    select,button { width:100%; border:0; border-radius:14px; font:inherit; }
+    select,.input-shell { background:rgba(255,255,255,.04); color:var(--text); padding:12px 14px; border:1px solid var(--line); }
+    button { padding:13px 16px; font-weight:700; cursor:pointer; color:#08110d; background:linear-gradient(135deg,#00ff88,#7dffb7); }
+    button.secondary { background:rgba(255,255,255,.06); color:var(--text); border:1px solid var(--line); }
+    .toggle { appearance:none; width:54px; height:30px; border-radius:999px; background:rgba(255,255,255,.12); position:relative; transition:.2s ease; cursor:pointer; border:1px solid var(--line); }
+    .toggle::after { content:""; position:absolute; width:22px; height:22px; border-radius:50%; background:white; top:3px; left:3px; transition:.2s ease; }
+    .toggle:checked { background:rgba(0,255,136,.3); border-color:rgba(0,255,136,.4); }
+    .toggle:checked::after { transform:translateX(24px); }
+    .tabs { position:fixed; left:50%; bottom:14px; transform:translateX(-50%); width:min(398px, calc(100% - 24px)); display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; padding:8px; background:rgba(13,15,20,.92); backdrop-filter:blur(18px); border:1px solid var(--line); border-radius:22px; box-shadow:var(--shadow); }
+    .tab-btn { background:transparent; color:var(--muted); padding:10px 6px; font-size:.78rem; font-weight:600; }
+    .tab-btn.active { color:var(--text); background:rgba(255,255,255,.06); }
+    .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:flex-end; justify-content:center; padding:0 12px 12px; }
+    .modal-backdrop.open { display:flex; }
+    .modal { width:min(430px, 100%); background:linear-gradient(180deg,#141923,#0d0f14); border-radius:24px 24px 18px 18px; border:1px solid var(--line); padding:18px; animation:slideUp .18s ease; }
+    .modal-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
+    .toast-wrap { position:fixed; top:14px; left:50%; transform:translateX(-50%); width:min(390px, calc(100% - 24px)); display:grid; gap:10px; z-index:20; }
+    .toast { background:rgba(14,19,28,.95); border:1px solid var(--line); border-left:4px solid var(--amber); border-radius:14px; padding:12px 14px; box-shadow:var(--shadow); font-size:.88rem; }
+    .pull-hint { text-align:center; color:var(--muted); font-size:.76rem; margin-bottom:10px; }
+    @keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(0,255,136,.45); } 70% { box-shadow:0 0 0 10px rgba(0,255,136,0); } 100% { box-shadow:0 0 0 0 rgba(0,255,136,0); } }
+    @keyframes rise { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes slideUp { from { transform:translateY(24px); opacity:0; } to { transform:translateY(0); opacity:1; } }
+  </style>
+</head>
+<body>
+  <div class="toast-wrap" id="toasts"></div>
+  <div class="app">
+    <div class="header">
+      <div>
+        <div class="title">Polymarket Bot</div>
+        <div class="subtitle">FastAPI + auto-trading control panel</div>
+        <div class="warning" id="staleWarning">Offline mode: showing cached data.</div>
+      </div>
+      <div class="last-updated" id="lastUpdated">Updating...</div>
+    </div>
+    <section class="tab active" data-tab="dashboard">
+      <div class="card">
+        <div class="stat"><div><div class="label">Balance</div><div class="money big" id="balanceValue">$0.00</div></div></div>
+        <div class="stat"><div class="label">Total P&amp;L</div><div class="value neutral" id="totalPnlValue">$0.00</div></div>
+        <div class="stat"><div class="label">Open Positions</div><div class="value" id="openPositionsValue">0</div></div>
+        <div class="stat"><div class="label">Bot Status</div><div class="bot-indicator"><span class="value" id="botStatusValue">STOPPED</span><span class="dot" id="botStatusDot"></span></div></div>
+      </div>
+      <div class="card">
+        <div class="section-title">Account Routing</div>
+        <div class="row small"><span class="muted">Signer</span><span class="mono" id="signerAddressValue">-</span></div>
+        <div class="spacer"></div>
+        <div class="row small"><span class="muted">Trading</span><span class="mono" id="tradingAddressValue">-</span></div>
+        <div class="spacer"></div>
+        <div class="row small"><span class="muted">Funder</span><span class="mono" id="funderAddressValue">-</span></div>
+        <div class="spacer"></div>
+        <div class="row small"><span class="muted">Free Collateral</span><span class="money" id="freeCollateralValue">$0.00</span></div>
+        <div class="spacer"></div>
+        <div class="row small"><span class="muted">Position Value</span><span class="money" id="positionValueValue">$0.00</span></div>
+        <div class="spacer"></div>
+        <div class="row"><span class="muted">Account Equity</span><span class="money" id="accountEquityValue">$0.00</span></div>
+        <div class="spacer"></div>
+        <div class="small neutral" id="balanceWarning" style="display:none;"></div>
+      </div>
+      <div class="card"><div class="section-title">7-Day Daily P&amp;L</div><canvas id="sparkline" width="360" height="90"></canvas></div>
+    </section>
+    <section class="tab" data-tab="positions"><div class="pull-hint" id="pullHint">Pull down to refresh positions</div><div class="list" id="positionsList"></div></section>
+    <section class="tab" data-tab="markets"><div class="list" id="marketsList"></div></section>
+    <section class="tab" data-tab="bot">
+      <div class="card"><div class="row"><div><div class="section-title">Auto Trading</div><div class="muted small">Start or stop the APScheduler trading loop.</div></div><input type="checkbox" class="toggle" id="botToggle" /></div></div>
+      <div class="card"><div class="section-title">Strategy</div><select id="strategySelect"><option value="related_market_arbitrage">Related Market Arbitrage</option><option value="mean_reversion">Mean Reversion</option></select></div>
+      <div class="card"><div class="section-title">Risk Parameters</div><div class="small muted" id="riskText">Loading...</div></div>
+      <div class="card"><div class="section-title">Last Actions</div><div class="scroll-area" id="actionLog"></div></div>
+    </section>
+  </div>
+  <nav class="tabs">
+    <button class="tab-btn active" data-target="dashboard">Dashboard</button>
+    <button class="tab-btn" data-target="positions">Positions</button>
+    <button class="tab-btn" data-target="markets">Markets</button>
+    <button class="tab-btn" data-target="bot">Bot</button>
+  </nav>
+  <div class="modal-backdrop" id="orderModalBackdrop">
+    <div class="modal">
+      <div class="section-title">Place Order</div>
+      <div class="market-title" id="modalMarketTitle">Market</div>
+      <div class="modal-actions"><button id="buyYesBtn">Buy YES</button><button id="buyNoBtn" class="secondary">Buy NO</button></div>
+      <div class="input-shell"><div class="small muted">Order size</div><div class="money big" id="sizeValue">$10</div></div>
+      <div class="spacer"></div>
+      <input type="range" id="sizeSlider" min="1" max="100" step="1" value="10" />
+      <div class="spacer"></div>
+      <button id="confirmOrderBtn">Confirm Order</button>
+      <div class="spacer"></div>
+      <button id="closeModalBtn" class="secondary">Close</button>
+    </div>
+  </div>
+  <script>
+    const state = { activeTab:"dashboard", cacheKey:"polymarket-bot-cache-v1", stale:false, balance:null, positions:[], pnl:null, markets:[], orders:[], bot:null, modal:{ market:null, side:"YES", size:10 } };
+    const els = { staleWarning:document.getElementById("staleWarning"), lastUpdated:document.getElementById("lastUpdated"), balanceValue:document.getElementById("balanceValue"), totalPnlValue:document.getElementById("totalPnlValue"), openPositionsValue:document.getElementById("openPositionsValue"), botStatusValue:document.getElementById("botStatusValue"), botStatusDot:document.getElementById("botStatusDot"), signerAddressValue:document.getElementById("signerAddressValue"), tradingAddressValue:document.getElementById("tradingAddressValue"), funderAddressValue:document.getElementById("funderAddressValue"), freeCollateralValue:document.getElementById("freeCollateralValue"), positionValueValue:document.getElementById("positionValueValue"), accountEquityValue:document.getElementById("accountEquityValue"), balanceWarning:document.getElementById("balanceWarning"), positionsList:document.getElementById("positionsList"), marketsList:document.getElementById("marketsList"), actionLog:document.getElementById("actionLog"), botToggle:document.getElementById("botToggle"), riskText:document.getElementById("riskText"), strategySelect:document.getElementById("strategySelect"), sparkline:document.getElementById("sparkline"), orderModalBackdrop:document.getElementById("orderModalBackdrop"), modalMarketTitle:document.getElementById("modalMarketTitle"), buyYesBtn:document.getElementById("buyYesBtn"), buyNoBtn:document.getElementById("buyNoBtn"), sizeSlider:document.getElementById("sizeSlider"), sizeValue:document.getElementById("sizeValue"), confirmOrderBtn:document.getElementById("confirmOrderBtn"), closeModalBtn:document.getElementById("closeModalBtn"), toasts:document.getElementById("toasts"), pullHint:document.getElementById("pullHint") };
+    const money = value => new Intl.NumberFormat("en-US", { style:"currency", currency:"USD" }).format(Number(value || 0));
+    const shortAddress = value => value ? `${value.slice(0, 6)}...${value.slice(-4)}` : "-";
+    const setPnlClass = (el, value) => { el.classList.remove("positive","negative","neutral"); el.classList.add(value > 0 ? "positive" : value < 0 ? "negative" : "neutral"); };
+    function toast(message, type="neutral") { const item=document.createElement("div"); item.className="toast"; item.style.borderLeftColor=type==="positive"?"var(--green)":type==="negative"?"var(--red)":"var(--amber)"; item.textContent=message; els.toasts.prepend(item); setTimeout(() => item.remove(), 3500); }
+    function cacheSnapshot() { localStorage.setItem(state.cacheKey, JSON.stringify({ balance:state.balance, positions:state.positions, pnl:state.pnl, markets:state.markets, orders:state.orders, bot:state.bot, lastUpdated:new Date().toISOString() })); }
+    function loadCache() { const raw=localStorage.getItem(state.cacheKey); if (!raw) return; try { const parsed=JSON.parse(raw); state.balance=parsed.balance||state.balance; state.positions=parsed.positions||state.positions; state.pnl=parsed.pnl||state.pnl; state.markets=parsed.markets||state.markets; state.orders=parsed.orders||state.orders; state.bot=parsed.bot||state.bot; state.stale=true; render(); } catch {} }
+    async function api(path, options={}) { const response=await fetch(path, { headers:{ "Content-Type":"application/json" }, ...options }); if (!response.ok) { const data=await response.json().catch(() => ({})); throw new Error(data.detail || `Request failed: ${response.status}`); } return response.json(); }
+    async function refreshCore() { try { const [balance, positions, pnl, markets, orders, bot] = await Promise.all([api("/api/balance"), api("/api/positions"), api("/api/pnl"), api("/api/markets"), api("/api/orders"), api("/api/bot/status")]); const previousLastAction=state.bot?.last_action; const previousOrderIds=new Set((state.orders || []).map(item => item.id)); const nextOrders=orders.orders || []; state.balance=balance; state.positions=positions.positions||[]; state.pnl=pnl; state.markets=markets.markets||[]; state.orders=nextOrders; state.bot=bot; state.stale=false; cacheSnapshot(); render(); if (previousLastAction && previousLastAction !== bot.last_action) toast(bot.last_action); if (previousOrderIds.size && nextOrders.length < previousOrderIds.size) toast("Open order count dropped. A fill or cancel may have occurred.", "positive"); } catch (error) { state.stale=true; render(); toast(error.message || "Refresh failed, using cached data.", "negative"); } }
+    async function refreshFast() { try { const [balance, positions, orders, bot] = await Promise.all([api("/api/balance"), api("/api/positions"), api("/api/orders"), api("/api/bot/status")]); const previousOrderIds=new Set((state.orders || []).map(item => item.id)); const nextOrders=orders.orders || []; state.balance=balance; state.positions=positions.positions||[]; state.orders=nextOrders; state.bot=bot; state.stale=false; cacheSnapshot(); render(); if (previousOrderIds.size && nextOrders.length < previousOrderIds.size) toast("Order update detected.", "positive"); } catch { state.stale=true; render(); } }
+    function renderDashboard() { els.balanceValue.textContent=money(state.balance?.usdc_balance || 0); const pnlValue=Number(state.pnl?.total_realized_pnl || 0) + state.positions.reduce((sum, item) => sum + Number(item.unrealized_pnl || 0), 0); els.totalPnlValue.textContent=money(pnlValue); setPnlClass(els.totalPnlValue, pnlValue); els.openPositionsValue.textContent=String(state.positions.length); els.signerAddressValue.textContent=shortAddress(state.balance?.signer_address); els.tradingAddressValue.textContent=shortAddress(state.balance?.trading_address); els.funderAddressValue.textContent=shortAddress(state.balance?.funder_address); els.freeCollateralValue.textContent=money(state.balance?.free_collateral || 0); els.positionValueValue.textContent=money(state.balance?.total_position_value || 0); els.accountEquityValue.textContent=money(state.balance?.account_equity || 0); els.balanceWarning.textContent=state.balance?.warning || ""; els.balanceWarning.style.display=state.balance?.warning ? "block" : "none"; const running=Boolean(state.bot?.running); els.botStatusValue.textContent=running?"RUNNING":"STOPPED"; els.botStatusDot.classList.toggle("running", running); els.botToggle.checked=running; }
+    function renderPositions() { els.positionsList.innerHTML = state.positions.length ? state.positions.map(position => `<div class="position-card"><div class="position-title">${escapeHtml(position.market_title || "Untitled market")}</div><div class="row"><span class="badge ${position.outcome === "YES" ? "positive" : "negative"}">${position.outcome}</span><span class="money">${money(position.size)}</span></div><div class="spacer"></div><div class="row small muted"><span>Entry ${Number(position.entry_price).toFixed(3)}</span><span>Current ${Number(position.current_price).toFixed(3)}</span></div><div class="spacer"></div><div class="row"><span class="small muted">Unrealized</span><span class="money ${Number(position.unrealized_pnl) >= 0 ? "positive" : "negative"}">${money(position.unrealized_pnl)}</span></div></div>`).join("") : '<div class="card muted">No open positions.</div>'; }
+    function renderMarkets() { els.marketsList.innerHTML = state.markets.length ? state.markets.map(market => `<div class="market-card" data-market-id="${market.market_id}"><div class="market-title">${escapeHtml(market.title)}</div><div class="row small muted"><span>YES ${Number(market.yes_price).toFixed(3)}</span><span>NO ${Number(market.no_price).toFixed(3)}</span></div><div class="spacer"></div><div class="row small"><span class="muted">Volume</span><span class="mono">${money(market.volume)}</span></div></div>`).join("") : '<div class="card muted">No active markets available.</div>'; els.marketsList.querySelectorAll(".market-card").forEach(card => card.addEventListener("click", () => openOrderModal(state.markets.find(item => item.market_id === card.dataset.marketId)))); }
+    function renderBot() { const actions=state.bot?.recent_actions||[]; els.actionLog.innerHTML=actions.length ? actions.map(item => `<div class="log-entry mono small">${escapeHtml(item)}</div>`).join("") : '<div class="muted small">No bot actions yet.</div>'; const risk=state.bot?.risk||{}; els.riskText.innerHTML=`Max total exposure: ${(Number(risk.max_total_exposure_fraction || 0) * 100).toFixed(0)}%<br />Per-market max: ${(Number(risk.max_market_exposure_fraction || 0) * 100).toFixed(0)}%<br />Stop-loss: ${(Number(risk.stop_loss_fraction || 0) * 100).toFixed(0)}%`; const options=state.bot?.available_strategies || ["related_market_arbitrage","mean_reversion"]; els.strategySelect.innerHTML = options.map(name => `<option value="${name}">${escapeHtml(name.replaceAll("_"," "))}</option>`).join(""); els.strategySelect.value=state.bot?.strategy || "related_market_arbitrage"; }
+    function drawSparkline() { const canvas=els.sparkline, ctx=canvas.getContext("2d"), data=(state.pnl?.daily || []).map(item => Number(item.realized_pnl || 0)); ctx.clearRect(0,0,canvas.width,canvas.height); if (!data.length) return; const min=Math.min(...data, 0), max=Math.max(...data, 0), range=Math.max(max - min, 1), padding=10, step=(canvas.width - padding * 2) / Math.max(data.length - 1, 1); ctx.beginPath(); ctx.lineWidth=2; ctx.strokeStyle="#00ff88"; data.forEach((value,index) => { const x=padding + index * step; const y=canvas.height - padding - ((value - min) / range) * (canvas.height - padding * 2); if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }); ctx.stroke(); }
+    function render() { renderDashboard(); renderPositions(); renderMarkets(); renderBot(); drawSparkline(); els.staleWarning.style.display=state.stale ? "block" : "none"; els.lastUpdated.textContent=state.stale ? "Cached data" : `Updated ${new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}`; }
+    function setActiveTab(target) { state.activeTab=target; document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.tab === target)); document.querySelectorAll(".tab-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.target === target)); }
+    function openOrderModal(market) { if (!market) return; state.modal.market=market; state.modal.side="YES"; els.modalMarketTitle.textContent=market.title; els.orderModalBackdrop.classList.add("open"); highlightOrderSide(); }
+    function closeOrderModal() { els.orderModalBackdrop.classList.remove("open"); }
+    function highlightOrderSide() { const yesActive=state.modal.side === "YES"; els.buyYesBtn.className=yesActive ? "" : "secondary"; els.buyNoBtn.className=yesActive ? "secondary" : ""; }
+    async function submitOrder() { if (!state.modal.market) return; const price=state.modal.side === "YES" ? Number(state.modal.market.yes_price) : Number(state.modal.market.no_price); try { await api("/api/order", { method:"POST", body:JSON.stringify({ market_id:state.modal.market.market_id, side:state.modal.side, size:Number(state.modal.size), price, order_type:"limit" }) }); toast(`Submitted ${state.modal.side} order for ${money(state.modal.size)}.`, "positive"); closeOrderModal(); refreshCore(); } catch (error) { toast(error.message || "Order failed.", "negative"); } }
+    async function toggleBot() { const endpoint=els.botToggle.checked ? "/api/bot/start" : "/api/bot/stop"; try { const response=await api(endpoint, { method:"POST" }); toast(response.message); refreshCore(); } catch (error) { els.botToggle.checked=!els.botToggle.checked; toast(error.message || "Bot control failed.", "negative"); } }
+    const escapeHtml = value => String(value).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");
+    document.querySelectorAll(".tab-btn").forEach(button => button.addEventListener("click", () => setActiveTab(button.dataset.target)));
+    els.buyYesBtn.addEventListener("click", () => { state.modal.side="YES"; highlightOrderSide(); });
+    els.buyNoBtn.addEventListener("click", () => { state.modal.side="NO"; highlightOrderSide(); });
+    els.sizeSlider.addEventListener("input", () => { state.modal.size=Number(els.sizeSlider.value); els.sizeValue.textContent=money(state.modal.size); });
+    els.confirmOrderBtn.addEventListener("click", submitOrder);
+    els.closeModalBtn.addEventListener("click", closeOrderModal);
+    els.orderModalBackdrop.addEventListener("click", event => { if (event.target === els.orderModalBackdrop) closeOrderModal(); });
+    els.botToggle.addEventListener("change", toggleBot);
+    els.strategySelect.addEventListener("change", async () => { try { const response = await api("/api/bot/strategy", { method:"POST", body:JSON.stringify({ strategy: els.strategySelect.value }) }); toast(response.message, "positive"); refreshCore(); } catch (error) { toast(error.message || "Strategy update failed.", "negative"); refreshCore(); } });
+    let startY=0, armed=false;
+    window.addEventListener("touchstart", event => { if (state.activeTab !== "positions" || window.scrollY > 0) return; startY=event.touches[0].clientY; armed=true; }, { passive:true });
+    window.addEventListener("touchmove", event => { if (!armed || state.activeTab !== "positions") return; const delta=event.touches[0].clientY - startY; if (delta > 80) { armed=false; els.pullHint.textContent="Refreshing positions..."; refreshCore().finally(() => { els.pullHint.textContent="Pull down to refresh positions"; }); } }, { passive:true });
+    window.addEventListener("touchend", () => { armed=false; }, { passive:true });
+    loadCache();
+    refreshCore();
+    setInterval(refreshFast, 15000);
+  </script>
+</body>
+</html>
