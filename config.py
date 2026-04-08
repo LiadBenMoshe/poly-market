@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     )
 
     scheduler_interval_seconds: int = 60
+    arb_scheduler_interval_seconds: int = 10
     min_market_volume: float = 10_000.0
     max_trade_fraction: float = 0.05
     max_total_exposure_fraction: float = 0.30
@@ -61,6 +62,27 @@ class Settings(BaseSettings):
     stop_loss_fraction: float = 0.20
     dry_run: bool = True
     request_timeout_seconds: float = 15.0
+    bybit_ws_url: str = "wss://stream.bybit.com/v5/public/linear"
+    bybit_api_key: str = ""
+    bybit_api_secret: str = ""
+    min_edge: float = 0.08
+    max_trade_usdc: float = 50.0
+    arb_trade_cap_usdc: float = 20.0
+    min_trade_usdc: float = 5.0
+    max_open_positions: int = 3
+    min_signal_score: float = 10.0
+    yes_signal_floor: float = 26.0
+    no_signal_floor: float = 30.0
+    yes_win_zone_max_signal: float = 40.0
+    no_win_zone_floor_signal: float = -45.0
+    extreme_no_signal_score: float = -40.0
+    extreme_no_size_multiplier: float = 0.5
+    max_trades_per_window: int = 1
+    trade_cooldown_sec: int = 60
+    arbot_enabled: bool = False
+    daily_loss_limit: float = 100.0
+    take_profit_usdc: float = 2.0
+    position_stop_loss_usdc: float = 5.0
 
     @computed_field  # type: ignore[misc]
     @property

@@ -141,6 +141,37 @@ class PolymarketClient:
         self._market_cache = (now, markets)
         return markets[:limit]
 
+    async def get_gamma_markets(self, **params: Any) -> list[dict[str, Any]]:
+        query = {key: value for key, value in params.items() if value is not None}
+        response = await self._http.get(f"{self.settings.gamma_base_url}/markets", params=query)
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, list) else payload.get("data", [])
+
+    async def get_gamma_events(self, **params: Any) -> list[dict[str, Any]]:
+        query = {key: value for key, value in params.items() if value is not None}
+        response = await self._http.get(f"{self.settings.gamma_base_url}/events", params=query)
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, list) else payload.get("data", [])
+
+    async def public_search(self, **params: Any) -> dict[str, Any]:
+        query = {key: value for key, value in params.items() if value is not None}
+        response = await self._http.get(f"{self.settings.gamma_base_url}/public-search", params=query)
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    async def get_market(self, market_id: str) -> dict[str, Any]:
+        response = await self._http.get(f"{self.settings.gamma_base_url}/markets/{market_id}")
+        response.raise_for_status()
+        return response.json()
+
+    async def get_market_by_slug(self, slug: str) -> dict[str, Any]:
+        response = await self._http.get(f"{self.settings.gamma_base_url}/markets/slug/{slug}")
+        response.raise_for_status()
+        return response.json()
+
     async def get_orderbook(self, token_id: str) -> dict[str, Any]:
         try:
             book = await self._run_clob("get_order_book", token_id)

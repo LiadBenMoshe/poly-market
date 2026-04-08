@@ -7,6 +7,7 @@ Production-oriented FastAPI trading bot for Polymarket with a mobile-first HTML 
 - Async FastAPI backend with Polymarket market, position, PnL, order, and bot-control endpoints
 - Polymarket integration using `py-clob-client`, `httpx`, and `eth-account`
 - Mean-reversion strategy with Kelly-lite sizing and configurable risk limits
+- BTC arbitrage strategy using Bybit public market data versus Polymarket BTC 5-minute markets
 - APScheduler trading loop with dry-run mode enabled by default
 - Single-file, mobile-optimized dashboard with offline-first caching via `localStorage`
 - `/health` endpoint for monitoring and CORS enabled for local development
@@ -22,6 +23,76 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Update `.env` with your wallet key and Polymarket API credentials before live trading.
 Use `.env.example` as the template for new environments.
+
+## BTC Arbitrage Setup
+
+The BTC arbitrage module uses Bybit's public WebSocket feed. No authenticated Bybit key is required for market data.
+
+Key environment values:
+
+```env
+BYBIT_API_KEY=
+BYBIT_API_SECRET=
+MIN_EDGE=0.08
+MAX_TRADE_USDC=50
+MIN_TRADE_USDC=5
+MAX_OPEN_POSITIONS=3
+MIN_SIGNAL_SCORE=10
+TRADE_COOLDOWN_SEC=60
+ARBOT_ENABLED=false
+ARB_SCHEDULER_INTERVAL_SECONDS=10
+DAILY_LOSS_LIMIT=100
+```
+
+Start the arb bot from the dashboard `ARB` tab or:
+
+```powershell
+Invoke-RestMethod -Method POST http://localhost:8000/api/arb/start
+```
+
+Useful arb endpoints:
+
+- `GET /api/arb/signal`
+- `GET /api/arb/btc-price`
+- `GET /api/arb/markets`
+- `GET /api/arb/trades`
+- `GET /api/arb/performance`
+- `POST /api/arb/start`
+- `POST /api/arb/stop`
+
+## BTC Arbitrage Strategy
+
+The strategy compares short-term BTC momentum from Bybit with Polymarket's `Bitcoin Up or Down - 5 Minutes` markets.
+
+Signal inputs:
+
+- 30-second price velocity
+- 90-second price velocity
+- RSI(14) on 1-minute candles
+- top-10 orderbook imbalance
+
+The signal is converted into a score from `-100` to `+100`. When the score is strong enough, the bot scans Polymarket for BTC 5-minute markets closing in the next 1-6 minutes, computes a fair value for `YES` / `NO`, and only trades when the estimated edge is above `MIN_EDGE`.
+
+Risk controls:
+
+- max concurrent BTC arb positions
+- per-market cooldown
+- daily loss stop
+- no trading in the last 30 seconds before close
+- slippage warning if fill deviates by more than 3 cents
+
+## Backtesting And Paper Mode
+
+When `DRY_RUN=true`, the bot uses the local paper engine. BTC arbitrage trades are simulated and persisted under `data/`.
+
+Paper mode assumptions:
+
+- fills happen immediately at the intended limit price
+- no queue priority modeling
+- no partial fills
+- no external transaction failures
+
+This makes paper mode good for logic verification and workflow testing, but not a full execution simulator.
 
 ## API Keys
 

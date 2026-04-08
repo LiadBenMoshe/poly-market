@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 from collections import deque
 from datetime import UTC, datetime
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from bot.paper import PaperTradingEngine
 from bot.risk import RiskLimits, RiskManager
 from bot.strategy import BaseStrategy, MeanReversionStrategy, RelatedMarketArbitrageStrategy
 from config import Settings
@@ -41,6 +43,7 @@ class TradingBotScheduler:
                 stop_loss_fraction=settings.stop_loss_fraction,
             )
         )
+        self.paper = PaperTradingEngine(Path("data") / "paper_portfolio.json")
         self.last_action = "Idle"
         self.action_log: deque[str] = deque(maxlen=10)
 
@@ -51,6 +54,7 @@ class TradingBotScheduler:
             "running": self.scheduler.running and job is not None,
             "strategy": self.strategy.name,
             "available_strategies": sorted(self.strategy_factories.keys()),
+            "execution_mode": "paper" if self.settings.dry_run else "live",
             "last_action": self.last_action,
             "next_run": next_run,
             "recent_actions": list(self.action_log),
@@ -91,13 +95,25 @@ class TradingBotScheduler:
     async def run_cycle(self) -> None:
         try:
             balance = await self.client.get_balance()
-            bankroll = float(balance["buying_power"])
-            positions = await fetch_positions(self.client)
+            if self.settings.dry_run:
+                self.paper.initialize(max(float(balance["buying_power"]), 100.0))
+            markets = await fetch_markets(self.client, limit=50)
+            market_map = {market.market_id: market for market in markets}
+            positions = self.paper.get_positions(market_map) if self.settings.dry_run else await fetch_positions(self.client)
+            bankroll = (
+                self.paper.get_balance(
+                    signer_address=self.client.signer_address,
+                    trading_address=self.client.trading_address,
+                    funder_address=self.settings.polymarket_funder or None,
+                    markets=market_map,
+                ).buying_power
+                if self.settings.dry_run
+                else float(balance["buying_power"])
+            )
 
             for loser in self.risk_manager.stop_loss_actions(positions):
                 self._record(f"Stop-loss triggered on {loser.market_title} ({loser.outcome}). Manual close required.")
 
-            markets = await fetch_markets(self.client, limit=50)
             proposals = self.strategy.generate_orders(markets, bankroll)
             if not proposals:
                 self._record("Cycle completed with no trade.")
@@ -113,9 +129,14 @@ class TradingBotScheduler:
                     self._record(f"{proposal.market_id}: {reason}")
                     continue
                 if self.settings.dry_run:
+                    market = market_map.get(proposal.market_id)
+                    if market is None:
+                        self._record(f"{proposal.market_id}: market metadata unavailable for paper fill.")
+                        continue
+                    fill = self.paper.execute_order(proposal, market)
                     self._record(
-                        f"Dry run: would place {proposal.outcome} on {proposal.market_id} "
-                        f"for ${proposal.size:.2f}. {proposal.reason}"
+                        f"Paper fill: bought {fill.outcome} on {fill.market_id} for ${fill.size:.2f} "
+                        f"at {fill.price:.3f}. {proposal.reason}"
                     )
                     continue
                 response = await self.client.place_order(
