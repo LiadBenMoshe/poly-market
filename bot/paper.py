@@ -147,6 +147,10 @@ class PaperTradingEngine:
         state = self._load()
         return self._position_rows(state, markets)
 
+    def has_position(self, *, market_id: str, outcome: str) -> bool:
+        state = self._load()
+        return self._position_key(market_id, outcome) in state["positions"]
+
     def get_orders(self) -> list[OrderResponse]:
         state = self._load()
         orders: list[OrderResponse] = []

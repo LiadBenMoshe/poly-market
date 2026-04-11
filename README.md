@@ -42,6 +42,8 @@ TRADE_COOLDOWN_SEC=60
 ARBOT_ENABLED=false
 ARB_SCHEDULER_INTERVAL_SECONDS=10
 DAILY_LOSS_LIMIT=100
+ARB_STOP_LOSS_FRACTION=0.35
+ARB_STOP_LOSS_CUTOFF_SECONDS=45
 ```
 
 Start the arb bot from the dashboard `ARB` tab or:
@@ -78,6 +80,8 @@ Risk controls:
 - max concurrent BTC arb positions
 - per-market cooldown
 - daily loss stop
+- percentage-based stop-loss per arb position
+- no stop-loss liquidation in the final 45 seconds before market close
 - no trading in the last 30 seconds before close
 - slippage warning if fill deviates by more than 3 cents
 
