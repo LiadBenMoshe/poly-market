@@ -289,6 +289,9 @@ class BtcArbitrageStrategy:
             "result": "pending",
             "warning": warning,
             "closes_at": market.closes_at.isoformat(),
+            "stop_loss_fraction": self.settings.arb_stop_loss_fraction,
+            "stop_loss_trigger_price": round(fill.price * (1 - self.settings.arb_stop_loss_fraction), 4),
+            "stop_loss_cutoff_seconds": self.settings.arb_stop_loss_cutoff_seconds,
         }
         state["trades"].append(trade)
         state["cooldowns"][market.id] = datetime.now(UTC).isoformat()
@@ -324,18 +327,15 @@ class BtcArbitrageStrategy:
             unrealized_pnl = self._unrealized_pnl(trade, current_price)
             if unrealized_pnl >= self.settings.take_profit_usdc:
                 if self.settings.dry_run and self.paper_engine is not None:
-                    trade["status"] = "resolved"
-                    trade["result"] = "take_profit"
-                    trade["pnl"] = self.paper_engine.close_position(
-                        market_id=trade["market_id"],
-                        outcome=trade["side"],
+                    total_pnl = self._close_paper_trade_batch(
+                        state,
+                        trade,
                         exit_price=current_price,
+                        result="take_profit",
+                        warning="take_profit_hit",
+                        mark_time_to_profit=True,
                     )
-                    trade["resolved_at"] = datetime.now(UTC).isoformat()
-                    trade["exit_price"] = round(current_price, 4)
-                    trade["warning"] = "take_profit_hit"
-                    trade["time_to_profit_sec"] = self._seconds_since_open(trade)
-                    self._alert(f"Paper take-profit exit: {trade['side']} {trade['market_id']} pnl ${trade['pnl']:.2f}")
+                    self._alert(f"Paper take-profit exit: {trade['side']} {trade['market_id']} pnl ${total_pnl:.2f}")
                     continue
                 token_id = str(trade.get("token_id") or "")
                 if token_id:
@@ -356,19 +356,16 @@ class BtcArbitrageStrategy:
                     trade["time_to_profit_sec"] = self._seconds_since_open(trade)
                     self._alert(f"Live take-profit exit submitted: {trade['side']} {trade['market_id']} pnl ${trade['pnl']:.2f}")
                     continue
-            if unrealized_pnl <= -abs(self.settings.position_stop_loss_usdc):
+            if self._should_trigger_stop_loss(trade, current_price):
                 if self.settings.dry_run and self.paper_engine is not None:
-                    trade["status"] = "resolved"
-                    trade["result"] = "stop_loss"
-                    trade["pnl"] = self.paper_engine.close_position(
-                        market_id=trade["market_id"],
-                        outcome=trade["side"],
+                    total_pnl = self._close_paper_trade_batch(
+                        state,
+                        trade,
                         exit_price=current_price,
+                        result="stop_loss",
+                        warning="stop_loss_hit",
                     )
-                    trade["resolved_at"] = datetime.now(UTC).isoformat()
-                    trade["exit_price"] = round(current_price, 4)
-                    trade["warning"] = "stop_loss_hit"
-                    self._alert(f"Paper stop-loss exit: {trade['side']} {trade['market_id']} pnl ${trade['pnl']:.2f}")
+                    self._alert(f"Paper stop-loss exit: {trade['side']} {trade['market_id']} pnl ${total_pnl:.2f}")
                     continue
                 token_id = str(trade.get("token_id") or "")
                 if token_id:
@@ -395,17 +392,14 @@ class BtcArbitrageStrategy:
             if resolved is None:
                 trade["warning"] = "resolution_pending"
                 continue
+            if self.settings.dry_run and self.paper_engine is not None:
+                self._settle_paper_trade_batch(state, trade, winning_outcome=resolved)
+                continue
             trade["status"] = "resolved"
             trade["result"] = "win" if resolved == trade["side"] else "loss"
             payout = trade["size"] / max(float(trade["entry_price"]), 1e-9) if trade["result"] == "win" else 0.0
             trade["pnl"] = round(payout - trade["size"], 2)
             trade["resolved_at"] = datetime.now(UTC).isoformat()
-            if self.settings.dry_run and self.paper_engine is not None:
-                trade["pnl"] = self.paper_engine.settle_position(
-                    market_id=trade["market_id"],
-                    outcome=trade["side"],
-                    winning_outcome=resolved,
-                )
 
     def _resolve_market_result(self, market: dict[str, Any]) -> str | None:
         raw_prices = market.get("outcomePrices")
@@ -443,10 +437,132 @@ class BtcArbitrageStrategy:
 
     @staticmethod
     def _unrealized_pnl(trade: dict[str, Any], current_price: float) -> float:
+        return round(BtcArbitrageStrategy._raw_unrealized_pnl(trade, current_price), 2)
+
+    @staticmethod
+    def _raw_unrealized_pnl(trade: dict[str, Any], current_price: float) -> float:
         entry_price = float(trade.get("entry_price") or 0.0)
         size = float(trade.get("size") or 0.0)
         shares = size / max(entry_price, 1e-9)
-        return round((shares * current_price) - size, 2)
+        return (shares * current_price) - size
+
+    def _should_trigger_stop_loss(self, trade: dict[str, Any], current_price: float) -> bool:
+        seconds_to_close = self._seconds_to_close(trade)
+        cutoff_seconds = int(trade.get("stop_loss_cutoff_seconds") or self.settings.arb_stop_loss_cutoff_seconds)
+        if seconds_to_close <= cutoff_seconds:
+            return False
+        trigger_price = float(
+            trade.get("stop_loss_trigger_price")
+            or max(0.0, float(trade.get("entry_price") or 0.0) * (1 - self.settings.arb_stop_loss_fraction))
+        )
+        return current_price <= trigger_price
+
+    def _close_paper_trade_batch(
+        self,
+        state: dict[str, Any],
+        trade: dict[str, Any],
+        *,
+        exit_price: float,
+        result: str,
+        warning: str,
+        mark_time_to_profit: bool = False,
+    ) -> float:
+        if self.paper_engine is None:
+            return 0.0
+        matching = self._matching_open_paper_trades(state, trade)
+        if not matching:
+            return 0.0
+        if not self.paper_engine.has_position(market_id=str(trade["market_id"]), outcome=str(trade["side"])):
+            resolved_at = datetime.now(UTC).isoformat()
+            for row in matching:
+                row["status"] = "resolved"
+                row["result"] = "paper_position_missing"
+                row["pnl"] = 0.0
+                row["resolved_at"] = resolved_at
+                row["exit_price"] = round(exit_price, 4)
+                row["warning"] = "paper_position_not_found"
+            return 0.0
+        total_pnl = self.paper_engine.close_position(
+            market_id=trade["market_id"],
+            outcome=trade["side"],
+            exit_price=exit_price,
+        )
+        raw_pnls = [self._raw_unrealized_pnl(row, exit_price) for row in matching]
+        rounded_pnls = self._round_batch_pnls(raw_pnls, total_pnl)
+        resolved_at = datetime.now(UTC).isoformat()
+        for index, row in enumerate(matching):
+            row["status"] = "resolved"
+            row["result"] = result
+            row["pnl"] = rounded_pnls[index]
+            row["resolved_at"] = resolved_at
+            row["exit_price"] = round(exit_price, 4)
+            row["warning"] = warning
+            if result == "stop_loss":
+                row["time_to_stop_sec"] = self._seconds_since_open(row)
+            if mark_time_to_profit:
+                row["time_to_profit_sec"] = self._seconds_since_open(row)
+        return total_pnl
+
+    def _settle_paper_trade_batch(self, state: dict[str, Any], trade: dict[str, Any], *, winning_outcome: str) -> None:
+        if self.paper_engine is None:
+            return
+        matching = self._matching_open_paper_trades(state, trade)
+        if not matching:
+            return
+        if not self.paper_engine.has_position(market_id=str(trade["market_id"]), outcome=str(trade["side"])):
+            resolved_at = datetime.now(UTC).isoformat()
+            for row in matching:
+                row["status"] = "resolved"
+                row["result"] = "paper_position_missing"
+                row["pnl"] = 0.0
+                row["resolved_at"] = resolved_at
+                row["warning"] = "paper_position_not_found"
+            return
+        total_pnl = self.paper_engine.settle_position(
+            market_id=trade["market_id"],
+            outcome=trade["side"],
+            winning_outcome=winning_outcome,
+        )
+        raw_pnls = [self._raw_settlement_pnl(row, winning_outcome) for row in matching]
+        rounded_pnls = self._round_batch_pnls(raw_pnls, total_pnl)
+        resolved_at = datetime.now(UTC).isoformat()
+        for index, row in enumerate(matching):
+            row["status"] = "resolved"
+            row["result"] = "win" if winning_outcome == row["side"] else "loss"
+            row["pnl"] = rounded_pnls[index]
+            row["resolved_at"] = resolved_at
+
+    @staticmethod
+    def _matching_open_paper_trades(state: dict[str, Any], trade: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in state.get("trades", [])
+            if row.get("status") == "open"
+            and str(row.get("market_id")) == str(trade.get("market_id"))
+            and str(row.get("side")) == str(trade.get("side"))
+        ]
+
+    @staticmethod
+    def _raw_settlement_pnl(trade: dict[str, Any], winning_outcome: str) -> float:
+        size = float(trade.get("size") or 0.0)
+        if str(trade.get("side")).upper() != winning_outcome.upper():
+            return -size
+        entry_price = float(trade.get("entry_price") or 0.0)
+        shares = size / max(entry_price, 1e-9)
+        return shares - size
+
+    @staticmethod
+    def _round_batch_pnls(raw_pnls: list[float], total_pnl: float) -> list[float]:
+        if not raw_pnls:
+            return []
+        rounded: list[float] = []
+        running_total = 0.0
+        for raw_value in raw_pnls[:-1]:
+            pnl = round(raw_value, 2)
+            rounded.append(pnl)
+            running_total += pnl
+        rounded.append(round(total_pnl - running_total, 2))
+        return rounded
 
     def _log_decision(self, state: dict[str, Any], action: str, payload: dict[str, Any]) -> None:
         state["decisions"].append({"timestamp": datetime.now(UTC).isoformat(), "action": action, **payload})
@@ -556,6 +672,14 @@ class BtcArbitrageStrategy:
         except ValueError:
             return 0
         return max(0, int((datetime.now(UTC) - opened_at).total_seconds()))
+
+    @staticmethod
+    def _seconds_to_close(trade: dict[str, Any]) -> int:
+        try:
+            closes_at = datetime.fromisoformat(str(trade.get("closes_at")))
+        except ValueError:
+            return 0
+        return max(0, int((closes_at - datetime.now(UTC)).total_seconds()))
 
     def _alert(self, message: str) -> None:
         timestamped = f"{datetime.now(UTC).strftime('%H:%M:%S')} UTC | {message}"

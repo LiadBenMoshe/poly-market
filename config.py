@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     daily_loss_limit: float = 100.0
     take_profit_usdc: float = 2.0
     position_stop_loss_usdc: float = 5.0
+    arb_stop_loss_fraction: float = 0.35
+    arb_stop_loss_cutoff_seconds: int = 45
 
     @computed_field  # type: ignore[misc]
     @property
