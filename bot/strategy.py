@@ -200,3 +200,60 @@ class RelatedMarketArbitrageStrategy(BaseStrategy):
         if len(tail) < 4:
             return ""
         return " ".join(tail[-4:])
+
+
+class WhaleFollowStrategy(BaseStrategy):
+    name = "whale_following"
+
+    def __init__(
+        self,
+        *,
+        whale_scanner: Any,
+        min_score: float = 55.0,
+        fallback_max_trade_fraction: float = 0.05,
+    ) -> None:
+        self.whale_scanner = whale_scanner
+        self.min_score = min_score
+        self.fallback_max_trade_fraction = fallback_max_trade_fraction
+
+    def should_trade(
+        self,
+        market: MarketResponse,
+        orderbook: dict[str, Any],
+        bankroll: float,
+    ) -> StrategyOrder | None:
+        return None
+
+    def generate_orders(self, markets: list[MarketResponse], bankroll: float) -> list[StrategyOrder]:
+        if bankroll <= 0 or self.whale_scanner is None:
+            return []
+        market_map = {market.market_id: market for market in markets}
+        signals = self.whale_scanner.get_actionable_signals(self.min_score)
+        for signal in signals:
+            market = market_map.get(str(signal.get("market_id") or ""))
+            if market is None or not market.active:
+                continue
+            outcome = str(signal.get("side") or "YES").upper()
+            token_id = market.yes_token_id if outcome == "YES" else market.no_token_id
+            price = market.yes_price if outcome == "YES" else market.no_price
+            if not token_id or price <= 0 or price >= 1:
+                continue
+            requested_fraction = float(signal.get("position_fraction") or self.fallback_max_trade_fraction)
+            size = round(bankroll * max(0.0, requested_fraction), 2)
+            if size <= 0:
+                continue
+            return [
+                StrategyOrder(
+                    market_id=market.market_id,
+                    token_id=token_id,
+                    side="BUY",
+                    outcome=outcome,
+                    price=price,
+                    size=size,
+                    reason=(
+                        f"Whale follow tier {signal.get('tier')} conviction {float(signal.get('conviction_score') or 0.0):.1f} "
+                        f"trade ${float(signal.get('size_usdc') or 0.0):,.0f}"
+                    ),
+                )
+            ]
+        return []

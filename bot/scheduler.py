@@ -10,7 +10,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.paper import PaperTradingEngine
 from bot.risk import RiskLimits, RiskManager
-from bot.strategy import BaseStrategy, MeanReversionStrategy, RelatedMarketArbitrageStrategy
+from bot.strategy import BaseStrategy, MeanReversionStrategy, RelatedMarketArbitrageStrategy, WhaleFollowStrategy
+from bot.whale_scanner import WhaleScanner
 from config import Settings
 from polymarket.client import PolymarketClient
 from polymarket.markets import fetch_markets
@@ -21,9 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 class TradingBotScheduler:
-    def __init__(self, client: PolymarketClient, settings: Settings) -> None:
+    def __init__(self, client: PolymarketClient, settings: Settings, whale_scanner: WhaleScanner | None = None) -> None:
         self.client = client
         self.settings = settings
+        self.whale_scanner = whale_scanner
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.strategy_factories = {
             "related_market_arbitrage": lambda: RelatedMarketArbitrageStrategy(
@@ -33,6 +35,11 @@ class TradingBotScheduler:
             "mean_reversion": lambda: MeanReversionStrategy(
                 volume_threshold=settings.min_market_volume,
                 max_trade_fraction=settings.max_trade_fraction,
+            ),
+            "whale_following": lambda: WhaleFollowStrategy(
+                whale_scanner=self.whale_scanner,
+                min_score=settings.whale_min_conviction_score,
+                fallback_max_trade_fraction=settings.max_trade_fraction,
             ),
         }
         self.strategy: BaseStrategy = self.strategy_factories["related_market_arbitrage"]()
@@ -63,6 +70,7 @@ class TradingBotScheduler:
                 "max_market_exposure_fraction": self.settings.max_market_exposure_fraction,
                 "stop_loss_fraction": self.settings.stop_loss_fraction,
             },
+            "whale_scanner": self.whale_scanner.snapshot() if self.whale_scanner is not None else {},
             "updated_at": datetime.now(UTC),
         }
 

@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 
 from bot.arbitrage import BtcArbitrageStrategy
 from bot.scheduler import TradingBotScheduler
+from bot.whale_scanner import WhaleScanner
 from config import Settings, get_settings
 from polymarket.client import PolymarketClient
 from polymarket.markets import fetch_markets
@@ -49,17 +50,21 @@ DASHBOARD_PATH = BASE_DIR / "dashboard" / "index.html"
 async def lifespan(app: FastAPI):
     settings = get_settings()
     client = PolymarketClient(settings)
-    bot = TradingBotScheduler(client, settings)
+    whale_scanner = WhaleScanner(client, settings)
+    bot = TradingBotScheduler(client, settings, whale_scanner=whale_scanner)
     arb = BtcArbitrageStrategy(
         client,
         settings,
+        whale_scanner=whale_scanner,
         paper_engine=bot.paper,
         stop_all_bots=lambda: bot.stop(),
     )
     app.state.settings = settings
     app.state.client = client
+    app.state.whale_scanner = whale_scanner
     app.state.bot = bot
     app.state.arb = arb
+    whale_scanner.start()
     await arb.start_feed()
     if settings.arbot_enabled:
         arb.start()
@@ -68,6 +73,7 @@ async def lifespan(app: FastAPI):
     finally:
         bot.stop()
         arb.stop()
+        whale_scanner.stop()
         await arb.stop_feed()
         await client.aclose()
 
@@ -92,6 +98,10 @@ def get_bot() -> TradingBotScheduler:
 
 def get_arb() -> BtcArbitrageStrategy:
     return app.state.arb  # type: ignore[no-any-return]
+
+
+def get_whale_scanner() -> WhaleScanner:
+    return app.state.whale_scanner  # type: ignore[no-any-return]
 
 
 def get_app_settings() -> Settings:
@@ -356,6 +366,14 @@ async def arb_performance(arb: BtcArbitrageStrategy = Depends(get_arb)) -> ArbPe
         return ArbPerformanceResponse(**arb.get_performance(), updated_at=datetime.now(UTC))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to fetch arbitrage performance: {exc}") from exc
+
+
+@app.get("/api/whales")
+async def whale_snapshot(whale_scanner: WhaleScanner = Depends(get_whale_scanner)) -> dict[str, object]:
+    try:
+        return whale_scanner.snapshot()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to fetch whale scanner snapshot: {exc}") from exc
 
 
 @app.post("/api/arb/start", response_model=ArbControlResponse)

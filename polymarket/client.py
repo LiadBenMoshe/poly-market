@@ -172,6 +172,42 @@ class PolymarketClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_public_trades(self, *, market_id: str, slug: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        candidates: list[tuple[str, dict[str, Any]]] = [
+            (f"{self.settings.data_api_base_url}/trades", {"market": market_id, "limit": limit}),
+            (f"{self.settings.data_api_base_url}/trades", {"market_id": market_id, "limit": limit}),
+            (f"{self.settings.gamma_base_url}/markets/{market_id}/trades", {"limit": limit}),
+        ]
+        if slug:
+            candidates.append((f"{self.settings.gamma_base_url}/markets/slug/{slug}/trades", {"limit": limit}))
+
+        for url, params in candidates:
+            try:
+                response = await self._http.get(url, params=params)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {404, 422}:
+                    continue
+                raise
+            payload = response.json()
+            if isinstance(payload, list):
+                return payload
+            if isinstance(payload, dict):
+                data = payload.get("data") or payload.get("trades") or payload.get("history") or []
+                if isinstance(data, list):
+                    return data
+        return []
+
+    async def get_external_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
+        response = await self._http.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+
+    async def get_external_text(self, url: str, params: dict[str, Any] | None = None) -> str:
+        response = await self._http.get(url, params=params)
+        response.raise_for_status()
+        return response.text
+
     async def get_orderbook(self, token_id: str) -> dict[str, Any]:
         try:
             book = await self._run_clob("get_order_book", token_id)

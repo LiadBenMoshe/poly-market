@@ -8,6 +8,7 @@ Production-oriented FastAPI trading bot for Polymarket with a mobile-first HTML 
 - Polymarket integration using `py-clob-client`, `httpx`, and `eth-account`
 - Mean-reversion strategy with Kelly-lite sizing and configurable risk limits
 - BTC arbitrage strategy using Bybit public market data versus Polymarket BTC 5-minute markets
+- Whale scanner service and standalone `polymarket_screener.py` runner for high-conviction trade flow
 - APScheduler trading loop with dry-run mode enabled by default
 - Single-file, mobile-optimized dashboard with offline-first caching via `localStorage`
 - `/health` endpoint for monitoring and CORS enabled for local development
@@ -61,6 +62,34 @@ Useful arb endpoints:
 - `GET /api/arb/performance`
 - `POST /api/arb/start`
 - `POST /api/arb/stop`
+- `GET /api/whales`
+
+## Whale Scanner
+
+Run the standalone screener with:
+
+```powershell
+python polymarket_screener.py
+```
+
+What it does:
+
+- scans up to `WHALE_MARKET_LIMIT` active Polymarket markets every `WHALE_SCAN_INTERVAL_SECONDS`
+- pulls recent public trade data and uses a dynamic whale threshold of `WHALE_THRESHOLD_MULTIPLIER x market median trade size`
+- scores each detected whale trade from `0-100` using relative size, wallet reputation, clustering, persistence, absolute size, category keywords, momentum, crypto correlation, and external oracle context
+- assigns tier-based position sizing of `30% / 20% / 10% / 5%`
+- shares its latest signals with the regular bot via the `whale_following` strategy and with the BTC arb bot as an additional bias input
+
+Oracle feeds used on a best-effort basis:
+
+- Binance BTC price change
+- Fear and Greed Index
+- Open-Meteo current weather
+- FRED macro series
+- ESPN scoreboard
+- FiveThirtyEight polling JSON
+
+If one oracle endpoint is unavailable, the scanner keeps running and simply scores without that component.
 
 ## BTC Arbitrage Strategy
 

@@ -85,6 +85,23 @@ class Settings(BaseSettings):
     position_stop_loss_usdc: float = 5.0
     arb_stop_loss_fraction: float = 0.35
     arb_stop_loss_cutoff_seconds: int = 45
+    whale_scan_interval_seconds: int = 10
+    whale_market_limit: int = 140
+    whale_trade_lookback: int = 40
+    whale_trade_concurrency: int = 12
+    whale_min_trade_size_usdc: float = 1_000.0
+    whale_threshold_multiplier: float = 1.6
+    whale_absolute_tier_1_usdc: float = 10_000.0
+    whale_absolute_tier_2_usdc: float = 20_000.0
+    whale_absolute_tier_3_usdc: float = 50_000.0
+    whale_tier_1_fraction: float = 0.30
+    whale_tier_2_fraction: float = 0.20
+    whale_tier_3_fraction: float = 0.10
+    whale_tier_4_fraction: float = 0.05
+    whale_min_conviction_score: float = 55.0
+    whale_state_retention_hours: int = 24
+    whale_weather_latitude: float = 40.7128
+    whale_weather_longitude: float = -74.0060
 
     @computed_field  # type: ignore[misc]
     @property

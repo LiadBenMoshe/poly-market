@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -14,14 +15,31 @@ from bot.bybit_feed import BybitFeed
 from bot.market_scanner import BtcMarket, EdgeResult, MarketScanner
 from bot.paper import PaperTradingEngine
 from bot.signal_engine import SignalEngine, SignalResult
+from bot.whale_scanner import WhaleScanner
 from config import Settings
 from polymarket.client import PolymarketClient
 from schemas import OrderResponse, StrategyOrder
+
+try:
+    import strategy_rsi_btc
+except ModuleNotFoundError:  # pragma: no cover - depends on local strategy file being present
+    strategy_rsi_btc = None
 
 
 logger = logging.getLogger(__name__)
 MAX_ARB_DECISIONS = 1000
 RESOLVED_TRADE_RETENTION_DAYS = 7
+
+# RSI strategy config
+RSI_PERIOD = 14
+BASE_MA_PERIOD = 14
+RSI_FIVE_MINUTE_MS = 5 * 60 * 1000
+ONE_MINUTE_MS = 60 * 1000
+RSI_UP_SIGNAL_SCORE = 30.0
+RSI_DOWN_SIGNAL_SCORE = -35.0
+RSI_WARMUP_CANDLES = RSI_PERIOD + BASE_MA_PERIOD
+BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
+BYBIT_KLINE_LIMIT = 200
 
 
 class BtcArbitrageStrategy:
@@ -30,6 +48,7 @@ class BtcArbitrageStrategy:
         client: PolymarketClient,
         settings: Settings,
         *,
+        whale_scanner: WhaleScanner | None = None,
         paper_engine: PaperTradingEngine | None = None,
         stop_all_bots: Callable[[], None] | None = None,
     ) -> None:
@@ -38,6 +57,7 @@ class BtcArbitrageStrategy:
         self.feed = BybitFeed(settings.bybit_ws_url)
         self.signal_engine = SignalEngine(self.feed)
         self.market_scanner = MarketScanner(client, settings)
+        self.whale_scanner = whale_scanner
         self.paper_engine = paper_engine
         self.stop_all_bots = stop_all_bots or (lambda: None)
         self.scheduler = AsyncIOScheduler(timezone="UTC")
@@ -47,9 +67,12 @@ class BtcArbitrageStrategy:
         self.last_market_edges: list[dict[str, Any]] = []
         self.last_scan_diagnostics: dict[str, Any] = {}
         self.alerts: deque[str] = deque(maxlen=20)
+        self._rsi_bootstrapped = False
+        self._configure_rsi_strategy()
 
     async def start_feed(self) -> None:
         await self.feed.start()
+        await self._bootstrap_rsi_strategy()
 
     async def stop_feed(self) -> None:
         await self.feed.stop()
@@ -79,6 +102,8 @@ class BtcArbitrageStrategy:
     async def run_cycle(self) -> None:
         state = self._load_state()
         await self._reconcile_positions(state)
+        if not self._rsi_bootstrapped:
+            await self._bootstrap_rsi_strategy()
 
         if self._daily_pnl(state) <= -abs(self.settings.daily_loss_limit):
             self.stop()
@@ -92,11 +117,59 @@ class BtcArbitrageStrategy:
             self._save_state(state)
             return
 
-        signal = self.signal_engine.compute()
+        candle = self._get_latest_closed_five_minute_candle()
+        if candle is None:
+            self._log_decision(state, "skip", {"reason": "No new closed 5-minute BTC candle."})
+            self._save_state(state)
+            return
+
+        last_bucket = int(state.get("rsi_last_candle_start") or 0)
+        if candle["bucket_start"] <= last_bucket:
+            self._log_decision(
+                state,
+                "skip",
+                {
+                    "reason": "5-minute BTC candle already processed.",
+                    "bucket_start": candle["bucket_start"],
+                },
+            )
+            self._save_state(state)
+            return
+
+        try:
+            signal_payload = self._compute_rsi_signal(candle["close"])
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("RSI signal logic failed for candle %s: %s", candle["bucket_start"], exc)
+            self._log_decision(
+                state,
+                "signal_error",
+                {
+                    "bucket_start": candle["bucket_start"],
+                    "close": candle["close"],
+                    "reason": str(exc),
+                },
+            )
+            state["rsi_last_candle_start"] = candle["bucket_start"]
+            self._save_state(state)
+            return
+
+        signal = self._translate_rsi_signal(signal_payload, candle)
+        signal = self._apply_whale_bias(signal)
         self.last_signal = signal
+        log_reason = str(signal_payload.get("reason") or "")
         self._log_decision(state, "signal", {"signal": self._signal_payload(signal)})
-        if abs(signal.score) < self.settings.min_signal_score:
-            self._log_decision(state, "no_trade", {"reason": "Signal below threshold.", "score": signal.score})
+
+        if str(signal_payload.get("signal") or "WAIT").upper() == "WAIT":
+            self._log_rsi_candle(state, candle, signal_payload, order_placed=False)
+            self._log_decision(
+                state,
+                "no_trade",
+                {
+                    "reason": log_reason or "RSI strategy returned WAIT.",
+                    "bucket_start": candle["bucket_start"],
+                },
+            )
+            state["rsi_last_candle_start"] = candle["bucket_start"]
             self._save_state(state)
             return
 
@@ -115,10 +188,15 @@ class BtcArbitrageStrategy:
         markets = await self.market_scanner.find_tradeable_markets()
         self.last_scan_diagnostics = self.market_scanner.diagnostics()
         self.last_market_edges = [
-            self._edge_payload(market, self.market_scanner.calculate_edge(market, signal, bankroll))
+            self._edge_payload(
+                market,
+                self.market_scanner.calculate_edge(market, signal, bankroll),
+                self._matching_whale_signal(market),
+            )
             for market in markets
         ]
         if not markets:
+            self._log_rsi_candle(state, candle, signal_payload, order_placed=False)
             self._log_decision(
                 state,
                 "no_trade",
@@ -128,9 +206,23 @@ class BtcArbitrageStrategy:
                     "score": signal.score,
                 },
             )
+            state["rsi_last_candle_start"] = candle["bucket_start"]
             self._save_state(state)
             return
         open_positions = [trade for trade in state["trades"] if trade["status"] == "open"]
+        if open_positions:
+            self._log_rsi_candle(state, candle, signal_payload, order_placed=False)
+            self._log_decision(
+                state,
+                "no_trade",
+                {
+                    "reason": "Existing open BTC market must resolve before a new RSI trade.",
+                    "open_positions": len(open_positions),
+                },
+            )
+            state["rsi_last_candle_start"] = candle["bucket_start"]
+            self._save_state(state)
+            return
 
         for market in markets:
             if market.seconds_until_close <= 30:
@@ -141,8 +233,8 @@ class BtcArbitrageStrategy:
                 continue
             if self._in_cooldown(state, market.id):
                 continue
-            if len(open_positions) >= self.settings.max_open_positions:
-                self._log_decision(state, "skip_market", {"market_id": market.id, "reason": "Max open positions reached."})
+            if len(open_positions) >= 1:
+                self._log_decision(state, "skip_market", {"market_id": market.id, "reason": "Existing position still open."})
                 break
 
             edge = self.market_scanner.calculate_edge(market, signal, bankroll)
@@ -164,9 +256,13 @@ class BtcArbitrageStrategy:
 
             trade = await self._execute_trade(state, market, edge, signal)
             open_positions.append(trade)
+            self._log_rsi_candle(state, candle, signal_payload, order_placed=True, market_id=market.id)
+            state["rsi_last_candle_start"] = candle["bucket_start"]
             self._save_state(state)
             return
 
+        self._log_rsi_candle(state, candle, signal_payload, order_placed=False)
+        state["rsi_last_candle_start"] = candle["bucket_start"]
         self._save_state(state)
 
     def get_signal_snapshot(self) -> dict[str, Any]:
@@ -203,7 +299,14 @@ class BtcArbitrageStrategy:
         markets = await self.market_scanner.find_tradeable_markets()
         self.last_scan_diagnostics = self.market_scanner.diagnostics()
         return {
-            "markets": [self._edge_payload(market, self.market_scanner.calculate_edge(market, signal, bankroll)) for market in markets],
+            "markets": [
+                self._edge_payload(
+                    market,
+                    self.market_scanner.calculate_edge(market, signal, bankroll),
+                    self._matching_whale_signal(market),
+                )
+                for market in markets
+            ],
             "scan_diagnostics": self.last_scan_diagnostics,
         }
 
@@ -604,8 +707,47 @@ class BtcArbitrageStrategy:
             "timestamp": signal.timestamp.isoformat(),
         }
 
-    def _edge_payload(self, market: BtcMarket, edge: EdgeResult) -> dict[str, Any]:
-        return {
+    def _apply_whale_bias(self, signal: SignalResult) -> SignalResult:
+        whale = self._latest_btc_whale_signal()
+        if whale is None:
+            return signal
+        bias = min(20.0, float(whale.get("conviction_score") or 0.0) * 0.2)
+        side = str(whale.get("side") or "YES").upper()
+        adjusted_score = signal.score + bias if side == "YES" else signal.score - bias
+        adjusted_score = max(-100.0, min(100.0, adjusted_score))
+        adjusted_signals = dict(signal.signals_dict)
+        adjusted_signals["whale_conviction"] = round(float(whale.get("conviction_score") or 0.0), 2)
+        adjusted_signals["whale_bias"] = round(bias if side == "YES" else -bias, 2)
+        return SignalResult(
+            score=round(adjusted_score, 2),
+            direction=self.signal_engine._classify(adjusted_score),
+            confidence=round(min(abs(adjusted_score) / 100.0, 1.0), 4),
+            signals_dict=adjusted_signals,
+            timestamp=signal.timestamp,
+        )
+
+    def _latest_btc_whale_signal(self) -> dict[str, Any] | None:
+        if self.whale_scanner is None:
+            return None
+        for row in self.whale_scanner.get_actionable_signals(self.settings.whale_min_conviction_score):
+            text = f"{row.get('title', '')} {row.get('slug', '')}".lower()
+            if "btc" in text or "bitcoin" in text:
+                return row
+        return None
+
+    def _matching_whale_signal(self, market: BtcMarket) -> dict[str, Any] | None:
+        if self.whale_scanner is None:
+            return None
+        for row in self.whale_scanner.get_actionable_signals(self.settings.whale_min_conviction_score):
+            if str(row.get("market_id") or "") == market.id:
+                return row
+            text = f"{row.get('title', '')} {row.get('slug', '')}".lower()
+            if market.title.lower() in text or text in market.title.lower():
+                return row
+        return None
+
+    def _edge_payload(self, market: BtcMarket, edge: EdgeResult, whale_signal: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = {
             "id": market.id,
             "title": market.title,
             "yes_price": market.yes_price,
@@ -620,14 +762,216 @@ class BtcArbitrageStrategy:
             "kelly_fraction": edge.kelly_fraction,
             "recommended_size_usdc": edge.recommended_size_usdc,
         }
+        if whale_signal is not None:
+            payload["whale_side"] = str(whale_signal.get("side") or "")
+            payload["whale_conviction_score"] = round(float(whale_signal.get("conviction_score") or 0.0), 2)
+            payload["whale_position_fraction"] = round(float(whale_signal.get("position_fraction") or 0.0), 4)
+        return payload
+
+    def _configure_rsi_strategy(self) -> None:
+        if strategy_rsi_btc is None:
+            logger.warning("strategy_rsi_btc.py not found; RSI BTC strategy integration will stay idle until the file exists.")
+            return
+        for attr_name, value in (("RSI_PERIOD", RSI_PERIOD), ("BASE_MA_PERIOD", BASE_MA_PERIOD)):
+            if hasattr(strategy_rsi_btc, attr_name):
+                setattr(strategy_rsi_btc, attr_name, value)
+
+    async def _bootstrap_rsi_strategy(self) -> None:
+        if self._rsi_bootstrapped or strategy_rsi_btc is None:
+            return
+
+        try:
+            candles = await self._fetch_recent_closed_five_minute_candles()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to preload RSI BTC strategy: %s", exc)
+            return
+
+        if len(candles) < RSI_WARMUP_CANDLES:
+            logger.info(
+                "RSI bootstrap waiting for more history: need %s closed 5m candles, got %s.",
+                RSI_WARMUP_CANDLES,
+                len(candles),
+            )
+            return
+
+        if hasattr(strategy_rsi_btc, "reset"):
+            strategy_rsi_btc.reset()
+        for candle in candles[-RSI_WARMUP_CANDLES:]:
+            strategy_rsi_btc.feed_close(float(candle["close"]))
+
+        latest_bucket_start = int(candles[-1]["bucket_start"])
+        state = self._load_state()
+        state["rsi_last_candle_start"] = max(int(state.get("rsi_last_candle_start") or 0), latest_bucket_start)
+        self._save_state(state)
+        self._rsi_bootstrapped = True
+        logger.info(
+            "RSI BTC strategy preloaded with %s closed 5m candles through %s.",
+            RSI_WARMUP_CANDLES,
+            candles[-1]["timestamp"].isoformat(),
+        )
+
+    async def _fetch_recent_closed_five_minute_candles(self) -> list[dict[str, Any]]:
+        timeout = max(5.0, float(self.settings.request_timeout_seconds))
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                BYBIT_KLINE_URL,
+                params={
+                    "category": "linear",
+                    "symbol": "BTCUSDT",
+                    "interval": "1",
+                    "limit": BYBIT_KLINE_LIMIT,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        rows = payload.get("result", {}).get("list", [])
+        one_minute_rows: list[dict[str, Any]] = []
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 5:
+                continue
+            start = int(row[0])
+            if start + ONE_MINUTE_MS > now_ms:
+                continue
+            one_minute_rows.append({"start": start, "close": float(row[4])})
+
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for candle in sorted(one_minute_rows, key=lambda item: int(item["start"])):
+            bucket_start = int(candle["start"]) - (int(candle["start"]) % RSI_FIVE_MINUTE_MS)
+            grouped.setdefault(bucket_start, []).append(candle)
+
+        complete: list[dict[str, Any]] = []
+        for bucket_start, candles in grouped.items():
+            ordered = sorted(candles, key=lambda item: int(item["start"]))
+            starts = [int(item["start"]) for item in ordered]
+            expected = [bucket_start + (offset * ONE_MINUTE_MS) for offset in range(5)]
+            if starts != expected:
+                continue
+            complete.append(
+                {
+                    "bucket_start": bucket_start,
+                    "timestamp": datetime.fromtimestamp((bucket_start + RSI_FIVE_MINUTE_MS) / 1000, tz=UTC),
+                    "close": float(ordered[-1]["close"]),
+                }
+            )
+        return complete
+
+    def _get_latest_closed_five_minute_candle(self) -> dict[str, Any] | None:
+        raw_candles = list(getattr(self.feed, "_candles", []))
+        if not raw_candles:
+            return None
+
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for candle in raw_candles:
+            if not candle.get("confirm"):
+                continue
+            start = int(candle.get("start") or 0)
+            if start <= 0:
+                continue
+            bucket_start = start - (start % RSI_FIVE_MINUTE_MS)
+            grouped.setdefault(bucket_start, []).append(candle)
+
+        complete: list[dict[str, Any]] = []
+        for bucket_start, candles in grouped.items():
+            ordered = sorted(candles, key=lambda row: int(row.get("start") or 0))
+            starts = [int(row.get("start") or 0) for row in ordered]
+            expected = [bucket_start + (offset * ONE_MINUTE_MS) for offset in range(5)]
+            if starts != expected:
+                continue
+            last_row = ordered[-1]
+            complete.append(
+                {
+                    "bucket_start": bucket_start,
+                    "timestamp": datetime.fromtimestamp((bucket_start + RSI_FIVE_MINUTE_MS) / 1000, tz=UTC),
+                    "close": float(last_row.get("close") or 0.0),
+                }
+            )
+
+        if not complete:
+            return None
+        return max(complete, key=lambda row: int(row["bucket_start"]))
+
+    def _compute_rsi_signal(self, close_price: float) -> dict[str, Any]:
+        if strategy_rsi_btc is None:
+            raise RuntimeError("strategy_rsi_btc.py is missing from the repository.")
+        strategy_rsi_btc.feed_close(float(close_price))
+        payload = strategy_rsi_btc.get_signal()
+        if not isinstance(payload, dict):
+            raise TypeError("strategy_rsi_btc.get_signal() must return a dict.")
+        return payload
+
+    def _translate_rsi_signal(self, signal_payload: dict[str, Any], candle: dict[str, Any]) -> SignalResult:
+        raw_signal = str(signal_payload.get("signal") or "WAIT").upper()
+        if raw_signal == "UP":
+            score = RSI_UP_SIGNAL_SCORE
+            direction = "UP"
+        elif raw_signal == "DOWN":
+            score = RSI_DOWN_SIGNAL_SCORE
+            direction = "DOWN"
+        else:
+            score = 0.0
+            direction = "WAIT"
+
+        rsi = float(signal_payload.get("rsi") or 0.0)
+        rsi_base_ma = float(signal_payload.get("rsi_base_ma") or 0.0)
+        confidence = min(abs(score) / 100.0, 1.0)
+        return SignalResult(
+            score=round(score, 2),
+            direction=direction,
+            confidence=round(confidence, 4),
+            signals_dict={
+                "price": round(float(candle["close"]), 2),
+                "rsi_14": round(rsi, 2),
+                "rsi_base_ma_14": round(rsi_base_ma, 2),
+            },
+            timestamp=datetime.now(UTC),
+        )
+
+    def _log_rsi_candle(
+        self,
+        state: dict[str, Any],
+        candle: dict[str, Any],
+        signal_payload: dict[str, Any],
+        *,
+        order_placed: bool,
+        market_id: str | None = None,
+    ) -> None:
+        log_row = {
+            "timestamp": candle["timestamp"].isoformat(),
+            "close": round(float(candle["close"]), 2),
+            "rsi": round(float(signal_payload.get("rsi") or 0.0), 4),
+            "rsi_base_ma": round(float(signal_payload.get("rsi_base_ma") or 0.0), 4),
+            "signal": str(signal_payload.get("signal") or "WAIT").upper(),
+            "reason": str(signal_payload.get("reason") or ""),
+            "order_placed": order_placed,
+        }
+        if market_id:
+            log_row["market_id"] = market_id
+        logger.info(
+            "BTC 5m candle %s close=%.2f rsi=%.4f rsi_base_ma=%.4f signal=%s order_placed=%s%s",
+            log_row["timestamp"],
+            log_row["close"],
+            log_row["rsi"],
+            log_row["rsi_base_ma"],
+            log_row["signal"],
+            log_row["order_placed"],
+            f" market_id={market_id}" if market_id else "",
+        )
+        self._log_decision(state, "rsi_candle", log_row)
 
     def _load_state(self) -> dict[str, Any]:
         if not self.state_path.exists():
-            return {"trades": [], "decisions": [], "cooldowns": {}}
+            return {"trades": [], "decisions": [], "cooldowns": {}, "rsi_last_candle_start": 0}
         try:
-            return json.loads(self.state_path.read_text(encoding="utf-8"))
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            state.setdefault("trades", [])
+            state.setdefault("decisions", [])
+            state.setdefault("cooldowns", {})
+            state.setdefault("rsi_last_candle_start", 0)
+            return state
         except json.JSONDecodeError:
-            return {"trades": [], "decisions": [], "cooldowns": {}}
+            return {"trades": [], "decisions": [], "cooldowns": {}, "rsi_last_candle_start": 0}
 
     def _save_state(self, state: dict[str, Any]) -> None:
         self._prune_state(state)
