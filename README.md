@@ -1,145 +1,71 @@
-# Polymarket Bot
+# PolymarketBot: late-favourite strategy
 
-Production-oriented FastAPI trading bot for Polymarket with a mobile-first HTML dashboard.
+One strategy only: in the last minutes of Polymarket's **BTC Up or Down 5m / 15m** markets,
+buy the side that has a **≥ 90% chance of winning**, but only when the market sells it
+**cheaper than that chance after fees**. Hold to resolution.
 
-## Features
+## Why "90% chance" alone is not enough
+A share that wins 90% of the time and costs 90¢ loses money once fees are counted:
 
-- Async FastAPI backend with Polymarket market, position, PnL, order, and bot-control endpoints
-- Polymarket integration using `py-clob-client`, `httpx`, and `eth-account`
-- Mean-reversion strategy with Kelly-lite sizing and configurable risk limits
-- BTC arbitrage strategy using Bybit public market data versus Polymarket BTC 5-minute markets
-- Whale scanner service and standalone `polymarket_screener.py` runner for high-conviction trade flow
-- APScheduler trading loop with dry-run mode enabled by default
-- Single-file, mobile-optimized dashboard with offline-first caching via `localStorage`
-- `/health` endpoint for monitoring and CORS enabled for local development
+| | per share |
+|---|---|
+| price | 0.9000 |
+| taker fee `0.07 × p × (1−p)` | 0.0063 |
+| **break-even win rate** | **90.63%** |
 
-## Setup
+So the bot computes its **own** probability and requires
+`p_model − avg_fill_price − fee_per_share ≥ MIN_NET_EDGE` (default 2¢/share).
 
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+## How the probability is computed
+- **Resolution source.** The markets settle on the Chainlink BTC/USD **TWAP-60s** stream.
+  - The "price to beat" is its value at the window open. The bot reads it from Polymarket's `crypto-price` endpoint.
+  - Settlement is the stream's value at the window close.
+- **Inputs.** The bot streams that same Chainlink feed from Polymarket's RTDS websocket, plus Bybit BTCUSDT trades for the unsmoothed price.
+  - A basis term maps Bybit onto Chainlink: `TWAP_now − Bybit 60s average`.
+- **The model** (`model.py`): Brownian motion for the remaining seconds, with the TWAP averaging handled exactly.
+  - Inside the last 60s, the already-observed part of the average is locked in.
+  - Volatility is the larger of the 15-minute tick volatility and the 60-minute 1m-candle volatility, times `VOL_MULTIPLIER`.
+  - Then `MODEL_HAIRCUT` is subtracted.
+- **Entry gates** (`strategy.py`):
+  - time left within the entry zone
+  - `p_model ≥ 0.90`
+  - expected settle at least `MIN_DISTANCE_USD` from the strike
+  - best ask between 0.85 and 0.97
+  - net edge after fees, at the real depth-weighted fill price
+- **Size.** ¼ Kelly, capped by `MAX_TRADE_USDC` and `MAX_OPEN_EXPOSURE_USDC`.
+- **Orders.** One fill-or-kill entry per market. Taker fees are calculated with the fee schedule each market publishes.
+
+## Files
+| File | What it does |
+|---|---|
+| `run.py` | Main loop: discover the market, estimate, decide, buy, settle |
+| `strategy.py` | Entry gates and sizing |
+| `model.py` | Win probability with TWAP settlement |
+| `fees.py` | Fee formula, depth-weighted fills, break-even and edge |
+| `price_feed.py` | Chainlink (RTDS) and Bybit websockets |
+| `pm_client.py` | Gamma, CLOB book, price to beat, FOK orders |
+| `ledger.py` | Trades in `data/trades.json`; PnL net of fees |
+| `report.py` | Win rate vs break-even, fees, net PnL, calibration |
+| `dashboard.py` + `dashboard.html` | Local web dashboard: total money, net PnL, wins/losses, PnL curve, trade history |
+| `backtest.py` | Checks that 90% really means 90%, against official historical results |
+
+## Usage
+```bash
 pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+cp .env.example .env              # DRY_RUN=true by default (paper trading on the real order book)
+python -m pytest -q               # unit tests
+python backtest.py --days 7       # calibration on official Polymarket results
+python run.py                     # paper trade; decisions logged to data/decisions.jsonl
+                                  # dashboard at http://127.0.0.1:8050 (or run: python dashboard.py)
+python report.py                  # net-of-fees results
 ```
 
-Update `.env` with your wallet key and Polymarket API credentials before live trading.
-Use `.env.example` as the template for new environments.
+Go live (`DRY_RUN=false`, with credentials from `python derive_creds.py`) only when **both** of these hold:
+- the backtest's realized win rate is at or above the predicted rate in every bucket;
+- paper trading shows positive net PnL, with a win rate above the break-even rate.
 
-## BTC Arbitrage Setup
-
-The BTC arbitrage module uses Bybit's public WebSocket feed. No authenticated Bybit key is required for market data.
-
-Key environment values:
-
-```env
-BYBIT_API_KEY=
-BYBIT_API_SECRET=
-MIN_EDGE=0.08
-MAX_TRADE_USDC=50
-MIN_TRADE_USDC=5
-MAX_OPEN_POSITIONS=3
-MIN_SIGNAL_SCORE=10
-TRADE_COOLDOWN_SEC=60
-ARBOT_ENABLED=false
-ARB_SCHEDULER_INTERVAL_SECONDS=10
-DAILY_LOSS_LIMIT=100
-ARB_STOP_LOSS_FRACTION=0.35
-ARB_STOP_LOSS_CUTOFF_SECONDS=45
-```
-
-Start the arb bot from the dashboard `ARB` tab or:
-
-```powershell
-Invoke-RestMethod -Method POST http://localhost:8000/api/arb/start
-```
-
-Useful arb endpoints:
-
-- `GET /api/arb/signal`
-- `GET /api/arb/btc-price`
-- `GET /api/arb/markets`
-- `GET /api/arb/trades`
-- `GET /api/arb/performance`
-- `POST /api/arb/start`
-- `POST /api/arb/stop`
-- `GET /api/whales`
-
-## Whale Scanner
-
-Run the standalone screener with:
-
-```powershell
-python polymarket_screener.py
-```
-
-What it does:
-
-- scans up to `WHALE_MARKET_LIMIT` active Polymarket markets every `WHALE_SCAN_INTERVAL_SECONDS`
-- pulls recent public trade data and uses a dynamic whale threshold of `WHALE_THRESHOLD_MULTIPLIER x market median trade size`
-- scores each detected whale trade from `0-100` using relative size, wallet reputation, clustering, persistence, absolute size, category keywords, momentum, crypto correlation, and external oracle context
-- assigns tier-based position sizing of `30% / 20% / 10% / 5%`
-- shares its latest signals with the regular bot via the `whale_following` strategy and with the BTC arb bot as an additional bias input
-
-Oracle feeds used on a best-effort basis:
-
-- Binance BTC price change
-- Fear and Greed Index
-- Open-Meteo current weather
-- FRED macro series
-- ESPN scoreboard
-- FiveThirtyEight polling JSON
-
-If one oracle endpoint is unavailable, the scanner keeps running and simply scores without that component.
-
-## BTC Arbitrage Strategy
-
-The strategy compares short-term BTC momentum from Bybit with Polymarket's `Bitcoin Up or Down - 5 Minutes` markets.
-
-Signal inputs:
-
-- 30-second price velocity
-- 90-second price velocity
-- RSI(14) on 1-minute candles
-- top-10 orderbook imbalance
-
-The signal is converted into a score from `-100` to `+100`. When the score is strong enough, the bot scans Polymarket for BTC 5-minute markets closing in the next 1-6 minutes, computes a fair value for `YES` / `NO`, and only trades when the estimated edge is above `MIN_EDGE`.
-
-Risk controls:
-
-- max concurrent BTC arb positions
-- per-market cooldown
-- daily loss stop
-- percentage-based stop-loss per arb position
-- no stop-loss liquidation in the final 45 seconds before market close
-- no trading in the last 30 seconds before close
-- slippage warning if fill deviates by more than 3 cents
-
-## Backtesting And Paper Mode
-
-When `DRY_RUN=true`, the bot uses the local paper engine. BTC arbitrage trades are simulated and persisted under `data/`.
-
-Paper mode assumptions:
-
-- fills happen immediately at the intended limit price
-- no queue priority modeling
-- no partial fills
-- no external transaction failures
-
-This makes paper mode good for logic verification and workflow testing, but not a full execution simulator.
-
-## API Keys
-
-If you do not already have Polymarket CLOB API credentials, the official SDK can derive them from your wallet signature when `POLYMARKET_PRIVATE_KEY` is configured and the explicit API key fields are left blank.
-
-Official references:
-
-- https://github.com/Polymarket/py-clob-client
-- https://docs.polymarket.com/
-
-## Safety Defaults
-
-- `DRY_RUN=true` by default
-- Max trade size: 5% of bankroll
-- Max total exposure: 30% of bankroll
-- Per-market exposure: 10% of bankroll
-- Stop-loss threshold: 20%
+## Risks
+- **One loss wipes out about 10 wins.** At 0.90, a win earns about +$0.09 per share and a loss costs about −$0.91.
+- **Competition.** Other bots compete for the same late-window mispricings, so fills can be rare.
+- **Paper fills are not real fills.** They walk the real order book but ignore latency and queue position. Live fills will be worse.
+- **Redemption is manual.** Winning shares may need to be redeemed on Polymarket; this bot does not do it.
