@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     loop_interval_seconds: float = 1.0
     timeframes: str = "5m,15m"
     data_dir: Path = BASE_DIR / "data"
-    dashboard_host: str = "127.0.0.1"
+    dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 8050          # 0 disables the dashboard
 
     # --- entry gates ---

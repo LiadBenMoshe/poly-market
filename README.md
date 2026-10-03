@@ -60,6 +60,23 @@ python run.py                     # paper trade; decisions logged to data/decisi
 python report.py                  # net-of-fees results
 ```
 
+## Run as a service (Ubuntu, systemd)
+Needs Python 3.11+ (Ubuntu 24.04 ships 3.12; on 22.04 install `python3.11` from the deadsnakes PPA).
+```bash
+sudo apt install -y python3-venv git
+git clone <your repo> ~/PolymarketBot && cd ~/PolymarketBot
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env && nano .env                     # keep DRY_RUN=true at first
+sed "s/YOUR_USER/$USER/g" deploy/polymarket-bot.service | sudo tee /etc/systemd/system/polymarket-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now polymarket-bot            # start now and on every boot
+journalctl -u polymarket-bot -f                       # live logs
+```
+Restart after changing code or `.env`: `sudo systemctl restart polymarket-bot`. Stop: `sudo systemctl stop polymarket-bot`.
+
+The dashboard listens on 127.0.0.1 only. From your PC, open it through SSH:
+`ssh -L 8050:127.0.0.1:8050 you@server`, then browse to http://127.0.0.1:8050.
+
 Go live (`DRY_RUN=false`, with credentials from `python derive_creds.py`) only when **both** of these hold:
 - the backtest's realized win rate is at or above the predicted rate in every bucket;
 - paper trading shows positive net PnL, with a win rate above the break-even rate.
