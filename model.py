@@ -1,8 +1,9 @@
 """Probability that a BTC up/down window settles "Up".
 
-Polymarket settles on Chainlink BTC/USD: Up if the settle value >= the strike (price to beat).
-The settle value is a TWAP over the last `twap_seconds` of the window (60s today), so near
-the end part of the average is already known and only the rest is random.
+Polymarket settles on Chainlink BTC/USD: Up if the settle value >= the strike (price to beat,
+the Chainlink price at the window open). The settle value is the average of Chainlink prices over
+the last `twap_seconds` of the window (60s today), so near the end part of the average is already
+known and only the rest is random.
 
 Price is modelled as arithmetic Brownian motion over the remaining seconds with
 per-second dollar volatility sigma_usd = sigma * S (fine for windows of a few minutes).

@@ -1,7 +1,7 @@
 """Calibration backtest: does "p_model >= 90%" really win >= 90% of the time?
 
-For each past 5m/15m window it takes Polymarket's official open (price to beat) and close
-(Chainlink TWAP) as ground truth, replays Binance 1-second BTC prices, and runs the exact
+For each past 5m/15m window it takes Polymarket's official open (price to beat) and the market's
+actual resolution as ground truth, replays Binance 1-second BTC prices, and runs the exact
 live model at every checkpoint inside the entry zone. The first checkpoint per window where
 the model clears the threshold is what the bot would trade.
 
@@ -70,18 +70,21 @@ async def load_official(pm: PolymarketClient, windows: list[tuple[str, int]], ca
     async def one(tf: str, start: int) -> None:
         nonlocal failed
         key = f"{tf}:{start}"
-        if key in stored:
+        if key in stored and stored[key].get("winner"):
             return
         data: dict = {}
+        winner = None
         async with sem:
             for attempt in range(6):
                 try:
                     data = await pm.get_crypto_price(tf, start)
+                    market = await pm.get_market(tf, start)
+                    winner = market.winning_side if market else None
                     break
                 except httpx.HTTPError:
                     await asyncio.sleep(1.5 * 2 ** attempt)  # rate limited: back off
-        if data.get("completed") and data.get("openPrice") is not None and data.get("closePrice") is not None:
-            stored[key] = {"open": float(data["openPrice"]), "close": float(data["closePrice"])}
+        if winner and data.get("openPrice") is not None:
+            stored[key] = {"open": float(data["openPrice"]), "winner": winner}
         else:
             failed += 1
 
@@ -153,11 +156,12 @@ async def main() -> None:
         if not res:
             continue
         stop = start + TIMEFRAME_SECONDS[tf]
-        strike, up_won = res["open"], res["close"] >= res["open"]
+        # Ground truth is Polymarket's actual resolution (official close >= open is wrong ~1 in 10 5m windows).
+        strike, up_won = res["open"], res["winner"] == "Up"
         ref = avg(prices, start - 60, start)
         if ref is None:
             continue
-        basis = strike - ref                      # Chainlink TWAP at open vs Binance 60s average
+        basis = strike - prices.get(start, ref)   # Chainlink spot at open vs Binance spot (no lookahead)
         traded = False
         for tau in range(s.max_seconds_left(tf), s.min_seconds_left - 1, -CHECKPOINT_STEP):
             t = stop - tau

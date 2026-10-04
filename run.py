@@ -33,6 +33,8 @@ class Bot:
         self._last_reason: dict[str, str] = {}
         self._next_settle_check: dict[str, float] = {}
         self._status_written_at = 0.0
+        self._portfolio: dict | None = None
+        self._portfolio_at = 0.0
 
     # --- helpers ---
     async def sigma(self) -> float:
@@ -65,8 +67,14 @@ class Bot:
         except Exception as exc:  # noqa: BLE001
             logger.warning("balance lookup failed: %s", exc)
             cash = None
+        if running and now - self._portfolio_at > 30:
+            self._portfolio_at = now
+            try:
+                self._portfolio = await self.pm.get_portfolio()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("portfolio lookup failed: %s", exc)
         status = {"mode": "paper" if self.s.dry_run else "live", "running": running,
-                  "updated_at": datetime.now(UTC).isoformat(), "cash_usdc": cash}
+                  "updated_at": datetime.now(UTC).isoformat(), "cash_usdc": cash, "portfolio": self._portfolio}
         path = self.s.data_dir / "status.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(status), encoding="utf-8")
@@ -110,7 +118,6 @@ class Bot:
             self.log_decision(slug, "no_price_to_beat_yet", {"seconds_left": round(seconds_left, 1)})
             return
 
-        # Map Bybit onto Chainlink's level with the basis over the last TWAP window.
         # Chainlink ticks every second, so its age is a real staleness signal. Bybit only pushes on
         # quote changes, so for it we require a live connection (any frame recently) instead.
         latest_cl = self.chainlink.series.latest()
@@ -123,18 +130,24 @@ class Bot:
             self.log_decision(slug, "stale_price_feed", {"seconds_left": round(seconds_left, 1),
                                                          "chainlink_age": round(cl_age, 1), "bybit_silence": round(bb_silence, 1)})
             return
+        # RTDS Chainlink values are spot prices; settlement is their average over the last L seconds.
+        # Bybit (fresher, ~1s ahead) is mapped onto Chainlink with a spot-to-spot basis: the median
+        # of (Chainlink - Bybit) over seconds where both have a value.
         L = market.twap_seconds
-        cl_second, twap_now = latest_cl
-        bb_avg = self.bybit.series.average(cl_second - max(L, 1), cl_second)
-        if bb_avg is None or bb_avg[1] < max(L, 1) * 0.5:
+        cl_second, cl_price = latest_cl
+        diffs = sorted(self.chainlink.series.prices[s] - self.bybit.series.prices[s]
+                       for s in range(cl_second - 30, cl_second + 1)
+                       if s in self.chainlink.series.prices and s in self.bybit.series.prices)
+        if len(diffs) < 10:
             self.log_decision(slug, "warming_up_feeds", {"seconds_left": round(seconds_left, 1)})
             return
-        basis = twap_now - bb_avg[0] if L else 0.0
+        basis = diffs[len(diffs) // 2]
         spot = latest_bb[1] + basis
         observed = None
         if L and seconds_left < L:
-            obs = self.bybit.series.average(end - L, int(now))
-            observed = obs[0] + basis if obs else None
+            # The part of the settlement average already printed, straight from Chainlink.
+            obs = self.chainlink.series.average(end - L, int(now))
+            observed = obs[0] if obs else None
 
         est = estimate_up(spot=spot, strike=strike, seconds_left=seconds_left, sigma_per_sec=await self.sigma(),
                           twap_seconds=L, observed_twap_avg=observed)
@@ -149,7 +162,7 @@ class Bot:
         view = MarketView(slug=slug, timeframe=timeframe, seconds_left=seconds_left, strike=strike, spot=spot,
                           fee_schedule=market.fee_schedule, asks=asks)
         decision = evaluate(view, est, self.s, await self.bankroll(), self.ledger.open_exposure())
-        decision.details.update(basis=round(basis, 2), twap_now=twap_now)
+        decision.details.update(basis=round(basis, 2), chainlink_now=cl_price, observed_avg=observed)
         self.log_decision(slug, decision.reason, decision.details)
         if decision.enter:
             await self.enter(market, decision)

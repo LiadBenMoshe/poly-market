@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # --- endpoints ---
     clob_base_url: str = "https://clob.polymarket.com"
+    data_api_base_url: str = "https://data-api.polymarket.com"
     gamma_base_url: str = "https://gamma-api.polymarket.com"
     crypto_price_url: str = "https://polymarket.com/api/crypto/crypto-price"
     rtds_ws_url: str = "wss://ws-live-data.polymarket.com"
@@ -71,6 +72,16 @@ class Settings(BaseSettings):
 
     # --- fees ---
     fallback_fee_rate: float = 0.07     # used if the market does not report a feeSchedule
+
+    @property
+    def trading_address(self) -> str:
+        """Wallet that holds the positions: the Polymarket proxy (funder) if set, else the signer."""
+        if self.polymarket_funder:
+            return self.polymarket_funder
+        if self.polymarket_private_key:
+            from eth_account import Account
+            return Account.from_key(self.polymarket_private_key).address
+        return ""
 
     @property
     def timeframe_list(self) -> list[str]:

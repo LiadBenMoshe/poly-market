@@ -107,6 +107,18 @@
   .badge.lost { color: var(--bad-text); }
   .badge.open { color: var(--muted); }
   .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 4px 12px; margin-bottom: 12px; }
+  .section-head h2 { margin: 0; }
+  .addr { color: var(--muted); font-size: 12.5px; }
+  .addr a { color: var(--ink-2); }
+  .ptiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .ptile { background: var(--page); border-radius: 10px; padding: 12px; min-width: 0; }
+  .ptile .label { color: var(--ink-2); font-size: 12.5px; }
+  .ptile .value { font-size: 22px; font-weight: 650; margin-top: 2px; }
+  .ptile .sub { color: var(--muted); font-size: 12px; }
+  .portfolio { margin-bottom: 16px; }
+  .badge.redeem { color: var(--good-text); }
+  @media (max-width: 520px) { .ptiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } }
 </style>
 </head>
 <body>
@@ -146,6 +158,14 @@
       <div class="value" id="k-fees">–</div>
       <div class="sub" id="k-fees-sub"></div>
     </div>
+  </section>
+
+  <section class="card portfolio" aria-label="Polymarket portfolio">
+    <div class="section-head">
+      <h2>My Polymarket portfolio</h2>
+      <span class="addr" id="p-addr"></span>
+    </div>
+    <div id="p-body"><div class="empty">Waiting for the bot to read your account…</div></div>
   </section>
 
   <section class="card chart-card">
@@ -336,9 +356,41 @@ function renderTable(d) {
   }).join("");
 }
 
+function renderPortfolio(d) {
+  const p = d.portfolio;
+  if (!p) {
+    $("p-addr").textContent = "";
+    $("p-body").innerHTML = `<div class="empty">No wallet configured. Set POLYMARKET_PRIVATE_KEY (and POLYMARKET_FUNDER) in .env to see your account.</div>`;
+    return;
+  }
+  const a = p.address || "";
+  $("p-addr").innerHTML = `<a href="https://polymarket.com/profile/${esc(a)}" target="_blank" rel="noopener">${esc(a.slice(0, 6))}…${esc(a.slice(-4))}</a> · updated ${when(d.portfolio_updated_at)}`;
+  const pnl = p.positions.reduce((s, x) => s + x.pnl, 0);
+  const tiles = `
+    <div class="ptiles">
+      <div class="ptile"><div class="label">Portfolio value</div><div class="value">${usd(p.total_usdc)}</div><div class="sub">cash + positions</div></div>
+      <div class="ptile"><div class="label">Cash (USDC)</div><div class="value">${p.cash_usdc === null ? "–" : usd(p.cash_usdc)}</div><div class="sub">${p.cash_usdc === null ? "needs private key" : "available to trade"}</div></div>
+      <div class="ptile"><div class="label">Positions value</div><div class="value">${usd(p.positions_value_usdc)}</div><div class="sub">${p.positions.length} position${p.positions.length === 1 ? "" : "s"} · PnL <span class="${pnl > 0 ? "up" : pnl < 0 ? "down" : ""}">${usd(pnl, true)}</span></div></div>
+      <div class="ptile"><div class="label">Winnings to redeem</div><div class="value ${p.redeemable_usdc > 0 ? "up" : ""}">${usd(p.redeemable_usdc)}</div><div class="sub">${p.redeemable_usdc > 0 ? "✓ claim on polymarket.com" : "nothing to claim"}</div></div>
+    </div>`;
+  const rows = p.positions.length
+    ? `<div class="table-scroll"><table>
+        <thead><tr><th>Market</th><th>Outcome</th><th class="num">Shares</th><th class="num">Avg price</th><th class="num">Now</th><th class="num">Value</th><th class="num">PnL</th><th>Status</th></tr></thead>
+        <tbody>${p.positions.map((x) => `<tr>
+          <td>${esc(x.title)}</td><td>${esc(x.outcome)}</td>
+          <td class="num">${x.shares.toFixed(2)}</td><td class="num">${x.avg_price.toFixed(3)}</td><td class="num">${x.cur_price.toFixed(3)}</td>
+          <td class="num">${usd(x.value)}</td>
+          <td class="num ${x.pnl > 0 ? "up" : x.pnl < 0 ? "down" : ""}">${usd(x.pnl, true)}</td>
+          <td>${x.redeemable ? `<span class="badge redeem">Redeemable</span>` : `<span class="badge open">Open</span>`}</td>
+        </tr>`).join("")}</tbody></table></div>`
+    : `<div class="note">No open positions.</div>`;
+  $("p-body").innerHTML = tiles + rows;
+}
+
 function render() {
   if (!data) return;
   renderTiles(data);
+  renderPortfolio(data);
   renderChart(data);
   renderTable(data);
 }

@@ -1,11 +1,10 @@
 """Live BTC prices.
 
-* ChainlinkTwapFeed - Polymarket's real-time data socket, topic crypto_prices_chainlink.
-  Its values ARE the Chainlink BTC/USD TWAP-60s stream the markets resolve on: the official
-  "price to beat" equals the value at the window's first second, and the settle value is the
-  value at the window's last second.
-* BybitSpotFeed - BTCUSDT perpetual mid price, used as the (unsmoothed) underlying price and for volatility.
-  A basis term maps Bybit onto Chainlink's level: basis = TWAP_now - avg(Bybit over last 60s).
+* ChainlinkTwapFeed - Polymarket's real-time data socket, topic crypto_prices_chainlink: Chainlink
+  BTC/USD *spot* prices, one per second. The official "price to beat" equals the value at the
+  window's first second; markets settle on the average of these values over the last 60 seconds.
+* BybitSpotFeed - BTCUSDT perpetual mid price, about a second fresher than Chainlink; mapped onto
+  Chainlink's level with a spot-to-spot basis.
 """
 from __future__ import annotations
 
@@ -171,8 +170,8 @@ class BybitSpotFeed(_WsFeed):
 
     def __init__(self, ws_url: str, keep_seconds: int = 1800) -> None:
         super().__init__(ws_url, keep_seconds)
-        self._bid = 0.0
-        self._ask = 0.0
+        self._bids: dict[float, float] = {}
+        self._asks: dict[float, float] = {}
 
     def subscribe_messages(self) -> list[dict]:
         return [{"op": "subscribe", "args": ["orderbook.1.BTCUSDT"]}]
@@ -194,12 +193,21 @@ class BybitSpotFeed(_WsFeed):
         if msg.get("topic") != "orderbook.1.BTCUSDT":
             return
         data = msg.get("data") or {}
-        if data.get("b"):
-            self._bid = float(data["b"][0][0])
-        if data.get("a"):
-            self._ask = float(data["a"][0][0])
-        if self._bid > 0 and self._ask > 0:
-            self.series.add(int(msg["ts"]) // 1000, (self._bid + self._ask) / 2)
+        # A delta can carry the old top level with size "0" (deleted) next to the new one,
+        # so keep a tiny book and read the best level from it instead of taking entry [0].
+        if msg.get("type") == "snapshot":
+            self._bids.clear()
+            self._asks.clear()
+        for side, book in (("b", self._bids), ("a", self._asks)):
+            for price, size in data.get(side) or []:
+                if float(size) == 0:
+                    book.pop(float(price), None)
+                else:
+                    book[float(price)] = float(size)
+        if self._bids and self._asks:
+            bid, ask = max(self._bids), min(self._asks)
+            if bid < ask:
+                self.series.add(int(msg["ts"]) // 1000, (bid + ask) / 2)
 
 
 async def bybit_kline_sigma_per_sec(http: httpx.AsyncClient, base_url: str, minutes: int = 60) -> float:

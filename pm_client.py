@@ -181,3 +181,48 @@ class PolymarketClient:
         result = await self._run_clob("get_balance_allowance", BalanceAllowanceParams(
             asset_type=AssetType.COLLATERAL, signature_type=self.settings.polymarket_signature_type))
         return float(result.get("balance", 0)) / 1_000_000
+
+    # --- portfolio (read-only) ---
+    async def get_positions(self, address: str) -> list[dict[str, Any]]:
+        resp = await self.http.get(f"{self.settings.data_api_base_url}/positions",
+                                   params={"user": address, "sizeThreshold": 0.01, "limit": 500})
+        resp.raise_for_status()
+        rows = resp.json()
+        return rows if isinstance(rows, list) else []
+
+    async def get_portfolio(self) -> dict[str, Any] | None:
+        """Real Polymarket account: USDC cash + open positions at current prices. None if no wallet configured."""
+        address = self.settings.trading_address
+        if not address:
+            return None
+        cash = None
+        if self.settings.polymarket_private_key:
+            try:
+                cash = await self.get_usdc_balance()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cash balance lookup failed: %s", exc)
+        positions = []
+        for row in await self.get_positions(address):
+            positions.append({
+                "title": row.get("title"),
+                "slug": row.get("slug"),
+                "outcome": row.get("outcome"),
+                "shares": float(row.get("size") or 0),
+                "avg_price": float(row.get("avgPrice") or 0),
+                "cur_price": float(row.get("curPrice") or 0),
+                "value": float(row.get("currentValue") or 0),
+                "cost": float(row.get("initialValue") or 0),
+                "pnl": float(row.get("cashPnl") or 0),
+                "redeemable": bool(row.get("redeemable")),
+                "end_date": row.get("endDate"),
+            })
+        positions.sort(key=lambda p: p["value"], reverse=True)
+        positions_value = sum(p["value"] for p in positions)
+        return {
+            "address": address,
+            "cash_usdc": cash,
+            "positions_value_usdc": positions_value,
+            "redeemable_usdc": sum(p["value"] for p in positions if p["redeemable"]),
+            "total_usdc": (cash or 0.0) + positions_value,
+            "positions": positions,
+        }

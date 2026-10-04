@@ -23,9 +23,17 @@ def build_payload(settings: Settings) -> dict:
     status_path = settings.data_dir / "status.json"
     status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
     open_exposure = ledger.open_exposure()
+    portfolio = status.get("portfolio")
+    total = None
     if status.get("mode") == "live":
-        cash = float(status.get("cash_usdc") or 0.0)
         start = None  # unknown for a live wallet; PnL comes from the ledger
+        if portfolio and portfolio.get("cash_usdc") is not None:
+            # The real account is the source of truth: cash + positions at current prices.
+            cash = float(portfolio["cash_usdc"])
+            open_exposure = float(portfolio.get("positions_value_usdc") or 0.0)
+            total = float(portfolio["total_usdc"])
+        else:
+            cash = float(status.get("cash_usdc") or 0.0)
     else:
         cash = ledger.paper_bankroll()
         start = settings.paper_bankroll_usdc
@@ -35,8 +43,10 @@ def build_payload(settings: Settings) -> dict:
         "bot_running": status.get("running", False),
         "cash_usdc": cash,
         "open_exposure_usdc": open_exposure,
-        "total_usdc": cash + open_exposure,
+        "total_usdc": total if total is not None else cash + open_exposure,
         "starting_usdc": start,
+        "portfolio": status.get("portfolio"),
+        "portfolio_updated_at": status.get("updated_at"),
         "stats": ledger.stats(),
         "trades": sorted(ledger.trades, key=lambda t: t["opened_at"], reverse=True),
     }
