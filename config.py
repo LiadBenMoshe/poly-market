@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     min_seconds_left: int = 8
     max_seconds_left_5m: int = 90
     max_seconds_left_15m: int = 240
-    max_price_age_seconds: float = 5.0  # skip if the Chainlink feed is stale
+    max_price_age_seconds: float = 8.0  # skip if the Chainlink feed is stale (it normally lags 1-6s)
 
     # --- sizing / risk ---
     kelly_fraction: float = 0.25

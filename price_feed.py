@@ -74,6 +74,7 @@ class SecondSeries:
 
 class _WsFeed:
     name = "feed"
+    silent_reconnect_seconds = 20.0
 
     def __init__(self, ws_url: str, keep_seconds: int = 1800) -> None:
         self.ws_url = ws_url
@@ -98,9 +99,21 @@ class _WsFeed:
                         await ws.send(json.dumps(message))
                         await asyncio.sleep(0.3)
                     backoff = 1
+                    connected_at = time.time()
                     pinger = asyncio.create_task(self._ping(ws))
                     try:
-                        async for raw in ws:
+                        while True:
+                            # Watchdog: a socket can stay open but stop delivering our symbol.
+                            # Reconnect if no price arrived for `silent_reconnect_seconds`.
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                            except asyncio.TimeoutError:
+                                raw = None
+                            silent = self.silence_seconds()
+                            if time.time() - connected_at > self.silent_reconnect_seconds and silent > self.silent_reconnect_seconds:
+                                raise ConnectionError(f"no {self.name} data for {silent:.0f}s")
+                            if raw is None:
+                                continue
                             self.last_message_at = time.time()
                             try:
                                 msg = json.loads(raw)
@@ -121,6 +134,10 @@ class _WsFeed:
         while True:
             await asyncio.sleep(5 if self.name == "chainlink" else 20)
             await ws.send(self.ping_message())
+
+    def silence_seconds(self) -> float:
+        """How long since this feed last produced a price."""
+        return self.series.age_seconds()
 
     def subscribe_messages(self) -> list[dict]:
         raise NotImplementedError
@@ -167,6 +184,7 @@ class BybitSpotFeed(_WsFeed):
     """BTCUSDT perpetual mid price from the level-1 order book (updates every second; trades are sparser)."""
 
     name = "bybit"
+    silent_reconnect_seconds = 60.0
 
     def __init__(self, ws_url: str, keep_seconds: int = 1800) -> None:
         super().__init__(ws_url, keep_seconds)
@@ -178,6 +196,10 @@ class BybitSpotFeed(_WsFeed):
 
     def ping_message(self) -> str:
         return json.dumps({"op": "ping"})
+
+    def silence_seconds(self) -> float:
+        # The series is forward-filled by current(), so judge liveness by frames received (incl. pongs).
+        return time.time() - self.last_message_at if self.last_message_at else 0.0
 
     def current(self, now: float | None = None) -> tuple[int, float] | None:
         """Latest mid, carried forward to `now`: Bybit only pushes level-1 when a quote changes."""

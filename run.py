@@ -17,6 +17,7 @@ from price_feed import BybitSpotFeed, ChainlinkTwapFeed, bybit_kline_sigma_per_s
 from strategy import MarketView, evaluate
 
 logger = logging.getLogger("late_favourite")
+MAX_ORDER_ATTEMPTS = 2   # per market; stops retry spam when Polymarket rejects or kills orders
 
 
 class Bot:
@@ -32,6 +33,7 @@ class Bot:
         self._live_balance = (0.0, 0.0)
         self._last_reason: dict[str, str] = {}
         self._next_settle_check: dict[str, float] = {}
+        self._order_attempts: dict[str, int] = {}   # failed live orders per market
         self._status_written_at = 0.0
         self._portfolio: dict | None = None
         self._portfolio_at = 0.0
@@ -105,6 +107,8 @@ class Bot:
         if seconds_left > self.s.max_seconds_left(timeframe) or seconds_left < self.s.min_seconds_left:
             return
         if self.ledger.has_traded(slug):
+            return
+        if self._order_attempts.get(slug, 0) >= MAX_ORDER_ATTEMPTS:
             return
         market = await self.market(timeframe, start)
         if market is None or not market.accepting_orders or market.closed:
@@ -180,12 +184,14 @@ class Bot:
             return
         worst = min(self.s.max_entry_price, round(fill.worst_price + market.tick_size, 2))
         try:
-            resp = await self.pm.buy_fok(market.tokens[decision.side], decision.budget_usdc, worst)
+            resp = await self.pm.buy_fok(market.tokens[decision.side], decision.budget_usdc, worst, market.tick_size)
         except Exception as exc:  # noqa: BLE001
+            self._order_attempts[market.slug] = self._order_attempts.get(market.slug, 0) + 1
             logger.warning("order failed %s: %s", market.slug, exc)
             self.log_decision(market.slug, "order_failed", {"error": str(exc)})
             return
         if not resp.get("success") or resp.get("status") != "matched":
+            self._order_attempts[market.slug] = self._order_attempts.get(market.slug, 0) + 1
             self.log_decision(market.slug, "order_not_filled", {"response": resp})
             return
         spent = float(resp.get("makingAmount") or decision.budget_usdc)
