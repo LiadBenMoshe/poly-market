@@ -60,6 +60,12 @@ python run.py                     # paper trade; decisions logged to data/decisi
 python report.py                  # net-of-fees results
 ```
 
+## Wallet setup (live trading)
+Polymarket only accepts API orders from a **Deposit Wallet** (signature type 3). Older email/Google
+"proxy" wallets are rejected with `maker address not allowed, please use the deposit wallet flow`.
+The bot trades through the official SDK (`polymarket-client`), acting for the Deposit Wallet owned by
+`POLYMARKET_PRIVATE_KEY`; a builder API key in `.env` pays for its gasless wallet transactions.
+
 ## Run as a service (Ubuntu, systemd)
 Needs Python 3.11+ (Ubuntu 24.04 ships 3.12; on 22.04 install `python3.11` from the deadsnakes PPA).
 ```bash

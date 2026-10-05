@@ -27,7 +27,10 @@ class Settings(BaseSettings):
     polymarket_api_secret: str = Field(default="")
     polymarket_api_passphrase: str = Field(default="")
     polymarket_funder: str = Field(default="")
-    polymarket_signature_type: int = 0
+    polymarket_signature_type: int = 3   # 3 = Deposit Wallet (the only kind Polymarket accepts API orders from)
+    polymarket_builder_api_key: str = Field(default="")
+    polymarket_builder_secret: str = Field(default="")
+    polymarket_builder_passphrase: str = Field(default="")
     chain_id: int = 137
 
     # --- endpoints ---

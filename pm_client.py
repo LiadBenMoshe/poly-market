@@ -93,6 +93,7 @@ class PolymarketClient:
         self._strike_retry_at: dict[tuple[str, int], float] = {}
 
     async def aclose(self) -> None:
+        await self.aclose_trading()
         await self.http.aclose()
 
     # --- market data (public) ---
@@ -140,50 +141,53 @@ class PolymarketClient:
         return sorted((float(a["price"]), float(a["size"])) for a in resp.json().get("asks") or [])
 
     # --- trading (authenticated) ---
-    def _build_clob(self):
-        """Authenticated client for Polymarket's CTF Exchange V2 (orders from the old
-        py-clob-client are rejected with "invalid order version")."""
+    async def _trading_client(self):
+        """Official Polymarket SDK client acting for the bot's Deposit Wallet.
+
+        Polymarket only accepts API orders from Deposit Wallets now ("maker address not allowed,
+        please use the deposit wallet flow" for older proxy wallets). The builder API key pays
+        for gasless wallet transactions.
+        """
         if self._clob is not None:
             return self._clob
-        from py_clob_client_v2 import ApiCreds, ClobClient
+        from polymarket import AsyncSecureClient, BuilderApiKey
 
         s = self.settings
         if not s.polymarket_private_key:
-            raise RuntimeError("POLYMARKET_PRIVATE_KEY is required when DRY_RUN=false")
-        if s.polymarket_api_key and s.polymarket_api_secret and s.polymarket_api_passphrase:
-            creds = ApiCreds(api_key=s.polymarket_api_key, api_secret=s.polymarket_api_secret,
-                             api_passphrase=s.polymarket_api_passphrase)
-        else:
-            creds = ClobClient(host=s.clob_base_url, chain_id=s.chain_id,
-                               key=s.polymarket_private_key).create_or_derive_api_key()
-        self._clob = ClobClient(host=s.clob_base_url, chain_id=s.chain_id, key=s.polymarket_private_key,
-                                creds=creds, signature_type=s.polymarket_signature_type,
-                                funder=s.polymarket_funder or None)
+            raise RuntimeError("POLYMARKET_PRIVATE_KEY is required for trading and balance lookups")
+        api_key = None
+        if s.polymarket_builder_api_key:
+            api_key = BuilderApiKey(key=s.polymarket_builder_api_key, secret=s.polymarket_builder_secret,
+                                    passphrase=s.polymarket_builder_passphrase)
+        async with self._clob_lock:
+            if self._clob is None:
+                self._clob = await AsyncSecureClient.create(private_key=s.polymarket_private_key,
+                                                            wallet=s.polymarket_funder or None, api_key=api_key)
         return self._clob
 
-    async def _run_clob(self, func_name: str, *args: Any, **kwargs: Any) -> Any:
-        async with self._clob_lock:
-            client = self._build_clob()
-            return await asyncio.to_thread(getattr(client, func_name), *args, **kwargs)
-
     async def buy_fok(self, token_id: str, usdc: float, worst_price: float, tick_size: float = 0.01) -> dict[str, Any]:
-        """Fill-or-kill market BUY spending `usdc` (excl. fees) at prices no worse than `worst_price`."""
-        from py_clob_client_v2 import MarketOrderArgs, OrderType, PartialCreateOrderOptions, Side
+        """Fill-or-kill market BUY spending `usdc` (excl. fees) at prices no worse than `worst_price`.
 
-        args = MarketOrderArgs(token_id=token_id, amount=round(usdc, 2), side=Side.BUY,
-                               price=worst_price, order_type=OrderType.FOK)
-        resp = await self._run_clob("create_and_post_market_order", order_args=args,
-                                    options=PartialCreateOrderOptions(tick_size=str(tick_size)),
-                                    order_type=OrderType.FOK)
-        return resp if isinstance(resp, dict) else {"raw": str(resp)}
+        Returns {"success", "status", "orderID", "makingAmount" ($ spent), "takingAmount" (shares)}.
+        """
+        client = await self._trading_client()
+        resp = await client.place_market_order(asset_id=token_id, side="BUY", amount=round(usdc, 2),
+                                               max_price=worst_price, order_type="FOK")
+        if not resp.ok:
+            return {"success": False, "status": resp.code, "error": resp.message}
+        return {"success": True, "status": str(resp.status), "orderID": str(resp.order_id),
+                "makingAmount": float(resp.making_amount), "takingAmount": float(resp.taking_amount)}
 
     async def get_usdc_balance(self) -> float:
         """Collateral (Polymarket USD) available to trade, in dollars."""
-        from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+        client = await self._trading_client()
+        result = await client.get_balance_allowance(asset_type="COLLATERAL")
+        return result.balance / 1_000_000
 
-        result = await self._run_clob("get_balance_allowance", BalanceAllowanceParams(
-            asset_type=AssetType.COLLATERAL, signature_type=self.settings.polymarket_signature_type))
-        return float(result.get("balance", 0)) / 1_000_000
+    async def aclose_trading(self) -> None:
+        if self._clob is not None:
+            await self._clob.close()
+            self._clob = None
 
     # --- portfolio (read-only) ---
     async def get_positions(self, address: str) -> list[dict[str, Any]]:
